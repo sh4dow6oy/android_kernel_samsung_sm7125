@@ -30,8 +30,12 @@
 #include <linux/sec_class.h>
 #include <linux/muic/muic_interface.h>
 //#include <linux/sec_ext.h>
-#ifdef CONFIG_BATTERY_SAMSUNG
+#if defined(CONFIG_BATTERY_SAMSUNG_V2)
 #include "../battery_v2/include/sec_charging_common.h"
+#elif defined(CONFIG_BATTERY_SAMSUNG_LEGO_STYLE)
+#include "../battery/common/include/sec_charging_common.h"
+#else
+#include <linux/battery/sec_charging_common.h>
 #endif
 #if defined(CONFIG_SEC_BSP)
 #include <linux/sec_param.h>
@@ -359,11 +363,11 @@ static ssize_t muic_sysfs_show_attached_dev(struct device *dev,
 		return sprintf(buf, "AUDIODOCK\n");
 	case ATTACHED_DEV_CHARGING_CABLE_MUIC:
 		return sprintf(buf, "PS CABLE\n");
+	case ATTACHED_DEV_AFC_CHARGER_DISABLED_MUIC:
 	case ATTACHED_DEV_AFC_CHARGER_5V_MUIC:
 	case ATTACHED_DEV_AFC_CHARGER_9V_MUIC:
 	case ATTACHED_DEV_QC_CHARGER_5V_MUIC:
 	case ATTACHED_DEV_QC_CHARGER_9V_MUIC:
-	case ATTACHED_DEV_AFC_CHARGER_DISABLED_MUIC:
 		return sprintf(buf, "AFC Charger\n");
 	case ATTACHED_DEV_FACTORY_UART_MUIC:
 		return sprintf(buf, "FACTORY UART\n");
@@ -426,7 +430,7 @@ static ssize_t muic_show_vbus_value(struct device *dev,
 	int val = 0;
 
 	MUIC_PDATA_FUNC(muic_if->get_vbus_voltage, muic_pdata->drv_data, &val);
-	
+
 	switch(val) {
 	case 0 ... 3:
 		val = 0;

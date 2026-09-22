@@ -45,13 +45,20 @@
 #include <linux/muic/muic_interface.h>
 
 #if defined(CONFIG_CCIC_NOTIFIER)
-#include <linux/usb/typec/pdic_notifier.h>
+#include <linux/ccic/pdic_notifier.h>
 #endif
 
 #if defined(CONFIG_USB_TYPEC_MANAGER_NOTIFIER)
-#include <linux/usb/typec/usb_typec_manager_notifier.h>
+#include <linux/usb/manager/usb_typec_manager_notifier.h>
 #endif
+#if defined(CONFIG_BATTERY_SAMSUNG_V2)
 #include "../battery_v2/include/sec_charging_common.h"
+#elif defined(CONFIG_BATTERY_SAMSUNG_LEGO_STYLE)
+#include "../battery/common/include/sec_charging_common.h"
+#else
+#include <linux/battery/sec_charging_common.h>
+#endif
+
 #define MUIC_CCIC_NOTI_ATTACH (1)
 #define MUIC_CCIC_NOTI_DETACH (-1)
 #define MUIC_CCIC_NOTI_UNDEFINED (0)
@@ -993,6 +1000,8 @@ static int muic_manager_get_property(struct power_supply *psy,
 	switch (psp) {
 	case POWER_SUPPLY_PROP_AFC_CHARGER_MODE:
 		break;
+	case POWER_SUPPLY_PROP_PM_VCHGIN:
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -1010,28 +1019,25 @@ static int muic_manager_set_property(struct power_supply *psy,
 	int ret;
 
 	switch (psp) {
-		case POWER_SUPPLY_PROP_AFC_CHARGER_MODE:
-			MUIC_PDATA_FUNC_MULTI_PARAM(muic_if->pm_chgin_irq,
-				muic_if->muic_data, val->intval, &ret);
-			break;
-		case POWER_SUPPLY_PROP_PM_FACTORY:
+	case POWER_SUPPLY_PROP_AFC_CHARGER_MODE:
+		break;
+	case POWER_SUPPLY_PROP_PM_VCHGIN:
+		MUIC_PDATA_FUNC_MULTI_PARAM(muic_if->pm_chgin_irq,
+			muic_if->muic_data, val->intval, &ret);
+		break;
+	case POWER_SUPPLY_PROP_MAX ... POWER_SUPPLY_EXT_PROP_MAX:
+		switch (ext_psp) {
+		case POWER_SUPPLY_EXT_PROP_CURRENT_MEASURE:
 			muic_if->is_bypass = true;
 			if (muic_if->set_bypass)
 				muic_if->set_bypass(muic_if->muic_data);
 			break;
-		case POWER_SUPPLY_PROP_MAX ... POWER_SUPPLY_EXT_PROP_MAX:
-			switch (ext_psp) {
-			case POWER_SUPPLY_EXT_PROP_CURRENT_MEASURE:
-				muic_if->is_bypass = true;
-				if (muic_if->set_bypass)
-					muic_if->set_bypass(muic_if->muic_data);
-				break;
-			default:
-				break;
-			}
-			break;
 		default:
-			return -EINVAL;
+			break;
+		}
+		break;
+	default:
+		return -EINVAL;
 	}
 	return 0;
 }
