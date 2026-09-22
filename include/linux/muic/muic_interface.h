@@ -221,10 +221,12 @@ struct muic_interface_t {
 	bool			is_muic_ready;
 	bool			undefined_range;
 	bool			discard_interrupt;
-	bool			is_dcdtmr_intr;
-	bool 			is_dcp_charger;
-	bool			is_afc_reset;
 	bool			is_afc_pdic_ready;
+#ifndef CONFIG_MUIC_SKIP_INCOMPLETE_INSERT
+	bool			is_dcdtmr_intr;
+	bool			is_dcp_charger;
+	bool			is_afc_reset;
+#endif
 	bool			is_bypass;
 	bool			is_ccic_attached;
 
@@ -286,6 +288,9 @@ struct muic_interface_t {
 #endif
 #if IS_ENABLED(CONFIG_HV_MUIC_VOLTAGE_CTRL)
 	int (*set_afc_voltage)(void *, int vol);
+	void (*change_afc_voltage)(void *, int);
+	int (*afc_get_voltage)(void *);
+	int (*afc_set_voltage)(void *, int);
 #endif
 	void (*set_chgtype_usrcmd)(void *);
 	void (*hv_reset)(void *);
