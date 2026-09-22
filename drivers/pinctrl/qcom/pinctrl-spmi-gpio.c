@@ -699,7 +699,6 @@ static void pmic_gpio_config_dbg_show(struct pinctrl_dev *pctldev,
 		seq_printf(s, " dtest-%d", pad->dtest_buffer);
 	}
 }
-
 #if defined(CONFIG_SEC_PM)
 static void pmic_gpio_sec_dbg_show(struct pinctrl_dev *pctldev,
 				      struct seq_file *s)
@@ -740,12 +739,16 @@ static void pmic_gpio_sec_dbg_show(struct pinctrl_dev *pctldev,
 				function = pad->function;
 			}
 
-			seq_printf(s, " %-4s", pad->output_enabled ? "OUT" : "IN");
-			seq_printf(s, " %-7s", pmic_gpio_functions[function]);
-			seq_printf(s, " vin-%d", pad->power_source);
-			seq_printf(s, " %-7s", biases[pad->pullup]);
-			seq_printf(s, " %-2s", pad->out_value ? "H" : "L");
-			seq_printf(s, " %-7s", strengths[pad->strength]);
+			seq_printf(s, " %-7s %-4s vin-%d %-7s %-2s %-7s atest-%d dtest-%d",
+					pmic_gpio_functions[function],
+					pad->output_enabled ? "OUT" : "IN",
+					pad->power_source,
+					biases[pad->pullup],
+					pad->out_value ? "H" : "L",
+					strengths[pad->strength],
+					pad->atest,
+					pad->dtest_buffer
+			);
 		}
 		seq_puts(s, "\n");
 	}
@@ -788,14 +791,17 @@ static void pmic_gpio_sec_dbg_print(struct pinctrl_dev *pctldev)
 				function = pad->function;
 			}
 
-			pr_info(" gpio%-2d: %-4s %-7s vin-%d %-7s %-2s %-7s\n",
+			pr_info(" gpio%-2d: %-7s %-4s vin-%d %-7s %-2s %-7s atest-%d dtest-%d\n",
 					pad->gpio_idx,
-					pad->output_enabled ? "OUT" : "IN",
 					pmic_gpio_functions[function],
+					pad->output_enabled ? "OUT" : "IN",
 					pad->power_source,
 					biases[pad->pullup],
 					pad->out_value ? "H" : "L",
-					strengths[pad->strength]);
+					strengths[pad->strength],
+					pad->atest,
+					pad->dtest_buffer
+			);
 		}
 	}
 }
