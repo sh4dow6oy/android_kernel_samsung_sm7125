@@ -24,21 +24,17 @@
 #define MSG_ACCEL_MAX	128
 #define MSG_GYRO_MAX	16
 #define MSG_MAG_MAX	15
-#define MSG_LIGHT_MAX	16
+#define MSG_LIGHT_MAX	13
 #define MSG_PROX_MAX	12
 #define MSG_MOBEAM_MAX	1
 #define MSG_GYRO_TEMP_MAX	3
 #define MSG_PRESSURE_TEMP_MAX	1
 #define MSG_PRESSURE_MAX	120
-#define MSG_FLIP_COVER_DETECTOR_MAX	3
 #define MSG_VOPTIC_MAX	2
 #define MSG_REG_SNS_MAX	18 /* 6 * 3 */
 #ifdef CONFIG_SUPPORT_AK0997X
 #define MSG_DIGITAL_HALL_MAX 11
 #define MSG_DIGITAL_HALL_ANGLE_MAX 58
-#endif
-#ifdef CONFIG_SUPPORT_DUAL_DDI_COPR_FOR_LIGHT_SENSOR
-#define MSG_DDI_MAX 2
 #endif
 
 enum {
@@ -68,9 +64,6 @@ enum {
 #endif
 	MSG_PRESSURE_TEMP,
 	MSG_MAG_CAL,//MSG_TYPE_SIZE_ZERO
-#ifdef CONFIG_FLIP_COVER_DETECTOR_FACTORY
-	MSG_FLIP_COVER_DETECTOR,
-#endif
 #ifdef CONFIG_SUPPORT_VIRTUAL_OPTIC
 	MSG_VIR_OPTIC,//MSG_TYPE_SIZE_ZERO
 #endif
@@ -80,12 +73,8 @@ enum {
 	MSG_DIGITAL_HALL_ANGLE,
 	MSG_LF_STREAM,
 #endif
-#ifdef CONFIG_SUPPORT_DUAL_DDI_COPR_FOR_LIGHT_SENSOR
-	MSG_DDI,
-#endif
-#ifdef CONFIG_SUPPORT_LIGHT_MAIN2_SENSOR
-	MSG_LIGHT_MAIN2,
-#endif
+/* If you need to add sensor_info to factory_ssc.h, */ 
+/* add new MSG type above this line.                */
 #ifdef CONFIG_SUPPORT_HIDDEN_HOLE_SUB
 	MSG_HH_HOLE_SUB,
 #endif
@@ -112,7 +101,6 @@ enum {
 	MSG_TYPE_FACTORY_ENABLE,
 	MSG_TYPE_FACTORY_DISABLE,
 	MSG_TYPE_OPTION_DEFINE,
-	MSG_TYPE_SET_SETTINGS,
 	MSG_TYPE_DUMPSTATE,
 	MSG_TYPE_MAX
 };
@@ -122,8 +110,7 @@ enum {
 	FSTATE_INACTIVE,
 	FSTATE_ACTIVE,
 	FSTATE_FAC_INACTIVE,
-	FSTATE_FAC_ACTIVE,
-	FSTATE_FAC_INACTIVE_2
+	FSTATE_FAC_ACTIVE
 };
 
 enum {
@@ -133,6 +120,17 @@ enum {
 	VOPTIC_OP_CMD_MAX
 };
 #endif
+
+enum {
+	COMMON_DATA_SET_ABS_OFF,		// 0x00 00 47 C1
+	COMMON_DATA_SET_ABS_ON,			// 0x01 00 47 C1
+#ifdef CONFIG_SUPPORT_VFOLD_FLEX
+	COMMON_DATA_SET_MAIN_ON,		// 0x02 00 47 C1
+	COMMON_DATA_SET_SUB_ON,			// 0x03 00 47 C1
+#endif
+	COMMON_DATA_SET_LCD_INTENT_ON = 0xf1,	// 0xf1 00 47 C1
+	COMMON_DATA_SET_LCD_INTENT_OFF,		// 0xf2 00 47 C1
+};
 
 // for ssc_core sensor type
 enum {
@@ -146,6 +144,10 @@ enum {
 	OPTION_TYPE_SSC_LIGHT_SEAMLESS,      // for light seamless
 	OPTION_TYPE_SSC_AUTO_ROTATION_MODE,  // for auto rotation
 	OPTION_TYPE_SSC_SBM_INIT,          // for sar backoff motion
+	OPTION_TYPE_SSC_WAKEUP_REASON,       // for commoninfo
+	OPTION_TYPE_SSC_RECOVERY,            // for commoninfo
+	OPTION_TYPE_SSC_POCKET_INJECT,       // for pocket mode
 	OPTION_TYPE_SSC_MAX
 };
+
 #endif
