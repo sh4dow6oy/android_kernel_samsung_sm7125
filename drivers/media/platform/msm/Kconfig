@@ -65,3 +65,7 @@ source "drivers/media/platform/msm/npu_v2/Kconfig"
 source "drivers/media/platform/msm/dvb/Kconfig"
 source "drivers/media/platform/msm/broadcast/Kconfig"
 source "drivers/media/platform/msm/camera/Kconfig"
+
+if SPECTRA_CAMERA_RENOVATION
+source "drivers/media/platform/msm/camera-renovation/Kconfig"
+endif # SPECTRA_CAMERA_RENOVATION
