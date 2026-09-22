@@ -221,7 +221,7 @@ config SND_SOC_SAMSUNG_MBHC_SUPPORT
 	help
 	  Say Y here to enable audio support for the Samsung MBHC.
 
-config SND_SOC_SAMSUNG_JACK
-	tristate "earjack sysfs support for Samsung MBHC"
+config SND_SOC_SAMSUNG_USB_HEADSET_ONLY
+	tristate "Audio sysfs support for Samsung USB HEADSET"
 	help
-	  Say Y here to enable earjack sysfs support for Samsung MBHC
+	  Say Y here to enable audio sysfs support for the Samsung USB HEADSET.
