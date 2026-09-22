@@ -377,8 +377,8 @@ static int msm_vibrator_probe(struct platform_device *pdev)
 			pr_err("[VIB] failed to get regulator\n");
 			return -EINVAL;
 		} else {
-			rc = regulator_set_voltage(vib->vdd, 3000000, 3000000);
-			pr_info("[VIB] voltage: 3.0V\n");
+			rc = regulator_set_voltage(vib->vdd, 3300000, 3300000);
+			pr_info("[VIB] voltage: 3.3V\n");
 
 			rc = regulator_set_load(vib->vdd, 100000);
 			pr_info("[VIB] set load to 100mA\n");

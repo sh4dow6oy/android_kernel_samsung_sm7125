@@ -23,7 +23,7 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/pm_qos.h>
 #include <linux/wakelock.h>
-#include <linux/pwm.h>
+
 #include "ss_vibrator.h"
 
 #if defined(CONFIG_SLPI_MOTOR)
@@ -34,7 +34,6 @@
 #define VIB_DEFAULT_TIMEOUT 10000
 #define PACKET_MAX_SIZE		1000
 #define MAX_LEN_VIB_TYPE 32
-#define PMIC_HAPTIC_LDO 1
 
 struct pm_qos_request pm_qos_req;
 static struct wake_lock vib_wake_lock;
@@ -63,7 +62,6 @@ struct ss_vib {
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *pin_active;
 	struct pinctrl_state *pin_suspend;
-	struct pwm_device       *pwm_dev;
 
 	int state;
 	int timeout;
@@ -75,8 +73,6 @@ struct ss_vib {
 	int packet_size;
 	int packet_cnt;
 	int f_overdrive_en;
-	int duty;
-	int period;
 
 	unsigned int vib_pwm_gpio;	/* gpio number for vibrator pwm */
 	unsigned int vib_en_gpio;	/* gpio number of vibrator enable */
@@ -308,7 +304,7 @@ static void max778xx_haptic_en(struct ss_vib *vib, bool onoff)
 
 static void set_vibrator(struct ss_vib *vib)
 {
-//	int ret;
+	int ret;
 
 	pr_info("[VIB]: %s, value[%d]\n", __func__, vib->state);
 	if (vib->state) {
@@ -317,6 +313,17 @@ static void set_vibrator(struct ss_vib *vib)
 #if defined(CONFIG_SLPI_MOTOR)
 		setSensorCallback(true, vib->timevalue);
 #endif
+		max778xx_haptic_en(vib, true);
+
+		if (IS_ERR(vib->pinctrl)) {
+			pr_debug("[VIB]: pinctrl error(%d)\n", IS_ERR(vib->pinctrl));
+		} else if (IS_ERR(vib->pin_active)) {
+			pr_debug("[VIB]: pin_active error(%d)\n", IS_ERR(vib->pin_active));
+		} else {
+			ret = pinctrl_select_state(vib->pinctrl, vib->pin_active);
+			if (ret)
+				pr_err("[VIB]: can not change pin_active\n");
+		}
 
 #if defined(CONFIG_BOOST_POWER_SHARE)
 		boost_power_on(vib, BOOST_REQUESTER_MOTOR, 1);
@@ -326,23 +333,35 @@ static void set_vibrator(struct ss_vib *vib)
 #endif
 		if (vib->flag_en_gpio)
 			gpio_set_value(vib->vib_en_gpio, VIBRATION_ON);
-
+		gpio_set_value(vib->vib_pwm_gpio, VIBRATION_ON);
 		hrtimer_start(&vib->vib_timer, ktime_set(vib->timevalue / 1000,
 			(vib->timevalue % 1000) * 1000000), HRTIMER_MODE_REL);
 	} else {
+		if (IS_ERR(vib->pinctrl)) {
+			pr_debug("[VIB]: pinctrl error(%d)\n", IS_ERR(vib->pinctrl));
+		} else if (IS_ERR(vib->pin_suspend)) {
+			pr_debug("[VIB]: pin_suspend error(%d)\n", IS_ERR(vib->pin_suspend));
+		} else {
+			ret = pinctrl_select_state(vib->pinctrl, vib->pin_suspend);
+			if (ret)
+				pr_err("[VIB]: can not change pin_suspend\n");
+		}
+
+		gpio_set_value(vib->vib_pwm_gpio, VIBRATION_OFF);
+
 		if (vib->flag_en_gpio)
 			gpio_set_value(vib->vib_en_gpio, VIBRATION_OFF);
-
 #if defined(CONFIG_BOOST_POWER_SHARE)
 		boost_power_on(vib, BOOST_REQUESTER_MOTOR, 0);
 #else
 		if (vib->power_onoff)
 			vib->power_onoff(0);
 #endif
+		max778xx_haptic_en(vib, false);
+
 #if defined(CONFIG_SLPI_MOTOR)
 		setSensorCallback(false, vib->timevalue);
 #endif
-
 		//PM_QOS_DEFAULT_VALUE
 		wake_unlock(&vib_wake_lock);
 		pm_qos_update_request(&pm_qos_req, PM_QOS_DEFAULT_VALUE);
@@ -481,20 +500,18 @@ static int vibrator_parse_dt(struct ss_vib *vib)
 	if (!gpio_is_valid(vib->vib_en_gpio)) {
 		vib->flag_en_gpio = 0;
 		pr_info("%s:%d, en gpio not specified\n", __func__, __LINE__);
-	} else {
+	} else
 		vib->flag_en_gpio = 1;
-		gpio_direction_output(vib->vib_en_gpio, 0);
-	}
 
 	vib->vib_power_gpio = of_get_named_gpio(np, "samsung,vib_power", 0);
 	if (!gpio_is_valid(vib->vib_power_gpio))
 		pr_err("%s:%d, power gpio not specified\n", __func__, __LINE__);
 
 	rc = of_property_read_u32(np, "samsung,chip_model", &vib->chip_model);
-	if (rc == 2) {
+	if (vib->chip_model == 2) {
 		pr_info("chip_model is SM5720\n");
 		vib->chip_model = CHIP_SM5720;
-	} else if (rc == 4) {
+	} else if (vib->chip_model == 4) {
 		pr_info("chip_model is MAX77705\n");
 		vib->chip_model = CHIP_MAX77705;
 	} else
@@ -879,60 +896,15 @@ static ssize_t motor_type_show(struct device *dev, struct device_attribute *attr
 
 static DEVICE_ATTR(motor_type, 0660, motor_type_show, NULL);
 
-static ssize_t pwm_active_store(struct device *dev,
-		struct device_attribute *devattr, const char *buf, size_t count)
-{
-	struct ss_vib *vib = dev_get_drvdata(dev);
-	struct pwm_state pstate;
-	int ret = 0;
-	int period = 0, duty = 0;
-
-	ret = sscanf(buf, "%d %d", &duty, &period);
-	if (ret) {
-		pr_err("[VIB]: %s failed to get pwm value", __func__);
-		return ret;
-	}
-
-	vib->period = period;
-	vib->duty = duty;
-	pwm_get_state(vib->pwm_dev, &pstate);
-	pstate.enabled = true;
-	pstate.period = period;
-	pstate.duty_cycle = duty;
-	pstate.output_type = PWM_OUTPUT_FIXED;
-	/* Use default pattern in PWM device */
-	pstate.output_pattern = NULL;
-
-	ret = pwm_apply_state(vib->pwm_dev, &pstate);
-	if (ret< 0)
-		dev_err(vib->dev, "Apply PWM state for sliding motor failed, rc=%d\n", ret);
-
-	return count;
-}
-
-static ssize_t pwm_active_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct ss_vib *vib = dev_get_drvdata(dev);
-
-	return sprintf(buf, "%d %d\n", vib->duty, vib->period);
-}
-
-static DEVICE_ATTR(pwm_active, 0660, pwm_active_show, pwm_active_store);
-
+#if defined(CONFIG_MOTOR_DRV_MAX77854) || defined(CONFIG_MOTOR_DRV_SM5720) || defined(CONFIG_MOTOR_DRV_MAX77705) || defined(CONFIG_MOTOR_DRV_ISA1000A)
 #if !defined(CONFIG_BOOST_POWER_SHARE)
 static void regulator_power_onoff(int onoff)
 {
-#if !defined(PMIC_HAPTIC_LDO)
-	static struct regulator *reg_ldo;
 	int ret;
-#endif
-#if defined(PMIC_HAPTIC_LDO)
-	ss_vib_ldo_enable(onoff);
-	pr_info("[VIB] enable pmic haptic ldo\n");
-#else
+	static struct regulator *reg_ldo;
+
 	if (!reg_ldo) {
-		reg_ldo = regulator_get(NULL, "pm6150_l16");
+		reg_ldo = regulator_get(NULL, "pmcobalt_l25");
 		if (IS_ERR(reg_ldo)) {
 			pr_info("could not get 8998_ldo, rc = %ld\n", PTR_ERR(reg_ldo));
 			return;
@@ -976,8 +948,8 @@ static void regulator_power_onoff(int onoff)
 			pr_info("[VIB]: power_off already\n");
 		}
 	}
-#endif
 }
+#endif
 #else
 static void regulator_power_onoff(int onoff)
 {
@@ -1126,11 +1098,9 @@ static int ss_vibrator_probe(struct platform_device *pdev)
 	if (rc < 0)
 		pr_err("[VIB]: Failed to register sysfs enable: %d\n", rc);
 
-	if (strcmp(vib->vib_type, "COINDC")) {
-		rc = sysfs_create_file(&vib->to_dev->kobj, &dev_attr_intensity.attr);
-		if (rc < 0)
-			pr_err("[VIB]: Failed to register sysfs intensity: %d\n", rc);
-	}
+	rc = sysfs_create_file(&vib->to_dev->kobj, &dev_attr_intensity.attr);
+	if (rc < 0)
+		pr_err("[VIB]: Failed to register sysfs intensity: %d\n", rc);
 
 	rc = sysfs_create_file(&vib->to_dev->kobj, &dev_attr_motor_type.attr);
 	if (rc < 0)
@@ -1150,10 +1120,6 @@ static int ss_vibrator_probe(struct platform_device *pdev)
 			pr_err("[VIB]: Failed to register sysfs haptic_engine: %d\n", rc);
 	}
 
-	rc = sysfs_create_file(&vib->to_dev->kobj, &dev_attr_pwm_active.attr);
-	if (rc < 0)
-		pr_err("[VIB]: Failed to register sysfs intensity: %d\n", rc);
-
 	vib_dev = device_create(vib->to_class, NULL, 0, vib, "vib");
 	if (IS_ERR(vib_dev))
 		pr_info("[VIB]: Failed to create device for samsung vib\n");
@@ -1169,11 +1135,14 @@ static int ss_vibrator_probe(struct platform_device *pdev)
 	if (IS_ERR(vib->pinctrl)) {
 		pr_err("[VIB]: Failed to get pinctrl(%d)\n", IS_ERR(vib->pinctrl));
 	} else {
-		vib->pin_active = pinctrl_lookup_state(vib->pinctrl, "tlmm_pwm_default");
-		if (IS_ERR(vib->pin_active)) {
+		vib->pin_active = pinctrl_lookup_state(vib->pinctrl, "tlmm_motor_active");
+		if (IS_ERR(vib->pin_active))
 			pr_err("[VIB]: Failed to get pin_active(%d)\n", IS_ERR(vib->pin_active));
+		vib->pin_suspend = pinctrl_lookup_state(vib->pinctrl, "tlmm_motor_suspend");
+		if (IS_ERR(vib->pin_suspend)) {
+			pr_err("[VIB]: Failed to get pin_suspend(%d)\n", IS_ERR(vib->pin_suspend));
 		} else {
-			rc = pinctrl_select_state(vib->pinctrl, vib->pin_active);
+			rc = pinctrl_select_state(vib->pinctrl, vib->pin_suspend);
 			if (rc)
 				pr_err("[VIB]: can not change pin_suspend\n");
 		}
