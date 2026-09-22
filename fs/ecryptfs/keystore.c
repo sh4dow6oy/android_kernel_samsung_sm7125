@@ -44,7 +44,7 @@
  * return an error code.
  */
  #ifdef CONFIG_ECRYPTFS_FEK_INTEGRITY
-static int eCryptfs_hmac_sha256(u8 *key, u8 ksize, char *plaintext, u8 psize, u8 *output)
+static int calculate_hmac_sha256(u8 *key, u8 ksize, char *plaintext, u8 psize, u8 *output)
 {
 	struct crypto_shash *tfm;
 	int rc = 0;
@@ -1755,11 +1755,10 @@ decrypt_passphrase_encrypted_session_key(struct ecryptfs_auth_tok *auth_tok,
 	int rc = 0;
 	char *hash_key = NULL;
 	char *iv = NULL;
-
 #ifdef CONFIG_ECRYPTFS_FEK_INTEGRITY
 	unsigned char hmac_hash[FEK_HASH_SIZE];
 	int rz = 0;
-#endif
+#endif	
 	if (unlikely(ecryptfs_verbosity > 0)) {
 		ecryptfs_printk(
 			KERN_DEBUG, "Session key encryption key (size [%d]):\n",
@@ -1862,15 +1861,14 @@ decrypt_passphrase_encrypted_session_key(struct ecryptfs_auth_tok *auth_tok,
 		printk(KERN_ERR "Error decrypting; rc = [%d]\n", rc);
 		goto out;
 	}
-
 #ifdef CONFIG_ECRYPTFS_FEK_INTEGRITY
 	if(crypt_stat->flags & ECRYPTFS_ENABLE_HMAC) {
 		if (crypt_stat->flags & ECRYPTFS_SUPPORT_HMAC_KEY
 				&& auth_tok->token.password.session_key_encryption_key_bytes == ECRYPTFS_MAX_KEY_BYTES) {
-			rz = eCryptfs_hmac_sha256(auth_tok->token.password.session_key_encryption_key + SEC_ECRYPTFS_HMAC_KEY_SIZE,
+			rz = calculate_hmac_sha256(auth_tok->token.password.session_key_encryption_key + SEC_ECRYPTFS_HMAC_KEY_SIZE,
 				crypt_stat->key_size, auth_tok->session_key.decrypted_key, auth_tok->session_key.encrypted_key_size, hmac_hash);
 		} else {
-			rz = eCryptfs_hmac_sha256(auth_tok->token.password.session_key_encryption_key,
+			rz = calculate_hmac_sha256(auth_tok->token.password.session_key_encryption_key,
 				crypt_stat->key_size, auth_tok->session_key.decrypted_key, auth_tok->session_key.encrypted_key_size, hmac_hash);
 		}
 	
@@ -1888,7 +1886,7 @@ decrypt_passphrase_encrypted_session_key(struct ecryptfs_auth_tok *auth_tok,
 	else {
 		ecryptfs_printk(KERN_INFO, "HMAC HASH is Not Present in SD Card...\n");
 	}
-#endif
+#endif	
 	auth_tok->session_key.flags |= ECRYPTFS_CONTAINS_DECRYPTED_KEY;
 	memcpy(crypt_stat->key, auth_tok->session_key.decrypted_key,
 	       auth_tok->session_key.decrypted_key_size);
@@ -2456,15 +2454,14 @@ write_tag_3_packet(char *dest, size_t *remaining_bytes,
 		ecryptfs_printk(KERN_DEBUG, "Session key encryption key:\n");
 		ecryptfs_dump_hex(session_key_encryption_key, 16);
 	}
-
 #ifdef CONFIG_ECRYPTFS_FEK_INTEGRITY
 	if(crypt_stat->flags & ECRYPTFS_ENABLE_HMAC) {
 		if(crypt_stat->flags & ECRYPTFS_SUPPORT_HMAC_KEY 
 				&& auth_tok->token.password.session_key_encryption_key_bytes == ECRYPTFS_MAX_KEY_BYTES ) {
-			rc = eCryptfs_hmac_sha256(session_hmac_key, crypt_stat->key_size,
+			rc = calculate_hmac_sha256(session_hmac_key, crypt_stat->key_size,
 				crypt_stat->key, crypt_stat->key_size, crypt_stat->hash);
 		}else {
-			rc = eCryptfs_hmac_sha256(session_key_encryption_key, crypt_stat->key_size,
+			rc = calculate_hmac_sha256(session_key_encryption_key, crypt_stat->key_size,
 				crypt_stat->key, crypt_stat->key_size, crypt_stat->hash);
 		}
 		if (rc < 0) {
@@ -2473,7 +2470,7 @@ write_tag_3_packet(char *dest, size_t *remaining_bytes,
 			goto out;
 		}
 	}
-#endif
+#endif	
 	rc = virt_to_scatterlist(crypt_stat->key, key_rec->enc_key_size,
 				 src_sg, 2);
 	if (rc < 1 || rc > 2) {
