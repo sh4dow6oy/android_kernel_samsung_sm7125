@@ -128,7 +128,7 @@ static struct pm_qos_object memory_bandwidth_pm_qos = {
 	.constraints = &memory_bw_constraints,
 	.name = "memory_bandwidth",
 };
-
+ 
 static BLOCKING_NOTIFIER_HEAD(hyst_bias_notifier);
 static struct pm_qos_constraints hyst_bias_constraints = {
 	.list = PLIST_HEAD_INIT(hyst_bias_constraints.list),
@@ -142,6 +142,7 @@ static struct pm_qos_object hyst_bias_pm_qos = {
 	.constraints = &hyst_bias_constraints,
 	.name = "hyst_bias",
 };
+
 
 static struct pm_qos_object *pm_qos_array[] = {
 	&null_pm_qos,
