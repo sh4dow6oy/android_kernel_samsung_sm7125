@@ -24,14 +24,14 @@
 #include <linux/irqdesc.h>
 
 #include "power.h"
+#ifdef CONFIG_SEC_PM
+#include <linux/wakeup_reason.h>
 
 #ifndef CONFIG_SUSPEND
 suspend_state_t pm_suspend_target_state;
 #define pm_suspend_target_state	(PM_SUSPEND_ON)
 #endif
 
-#ifdef CONFIG_SEC_PM
-#include <linux/wakeup_reason.h>
 #endif
 
 /*
@@ -714,12 +714,6 @@ static void wakeup_source_deactivate(struct wakeup_source *ws)
 	ws->total_time = ktime_add(ws->total_time, duration);
 	if (ktime_to_ns(duration) > ktime_to_ns(ws->max_time))
 		ws->max_time = duration;
-#ifdef CONFIG_SEC_PM_DEBUG
-	if (ktime_to_ms(duration) >= 10000LL) {
-		pr_info("PM: unlock %s(%lld ms)\n",
-			ws->name, ktime_to_ms(duration));
-	}
-#endif
 
 	ws->last_time = now;
 	del_timer(&ws->timer);
@@ -984,22 +978,24 @@ void pm_wakeup_clear(bool reset)
 
 void pm_system_irq_wakeup(unsigned int irq_number)
 {
+#ifndef CONFIG_SEC_PM
 	struct irq_desc *desc;
 	const char *name = "null";
+#endif
 
 	if (pm_wakeup_irq == 0) {
 		if (msm_show_resume_irq_mask) {
+#ifndef CONFIG_SEC_PM
 			desc = irq_to_desc(irq_number);
 			if (desc == NULL)
 				name = "stray irq";
 			else if (desc->action && desc->action->name)
 				name = desc->action->name;
 
-#ifdef CONFIG_SEC_PM
-			log_irq_wakeup_reason(irq_number);
-#else
 			pr_warn("%s: %d triggered %s\n", __func__,
 					irq_number, name);
+#else
+			log_irq_wakeup_reason(irq_number);
 #endif
 		}
 		pm_wakeup_irq = irq_number;
@@ -1177,10 +1173,9 @@ static int print_wakeup_source_active(
 		active_time = ktime_set(0, 0);
 	}
 
-	ret = pr_info("<%s>\tCount(%lu) Time(%lld/%lld) Prevent(%lld)\n",
+	ret = pr_info("%s: active_count(%lu), active_time(%lld), total_time(%lld)\n",
 			ws->name, active_count,
-			ktime_to_ms(active_time), ktime_to_ms(total_time),
-			ktime_to_ms(prevent_sleep_time));
+			ktime_to_ms(active_time), ktime_to_ms(total_time));
 
 	spin_unlock_irqrestore(&ws->lock, flags);
 

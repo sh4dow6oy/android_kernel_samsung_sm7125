@@ -323,4 +323,3 @@ static int __init modem_removed_dma_setup(struct reserved_mem *remem)
 RESERVEDMEM_OF_DECLARE(modem_dma, "modem-removed-dma-pool", modem_removed_dma_setup);
 #endif
 #endif
-
