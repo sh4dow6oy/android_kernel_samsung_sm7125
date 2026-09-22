@@ -5,6 +5,9 @@
  *	Minsung Kim <ms925.kim@samsung.com>
  *	Chiwoong Byun <woong.byun@samsung.com>
  *	 - 2014/10/24 Add HMP feature to support HMP
+ *	SangYoung Son <hello.son@samsung.com>
+ *	 - 2015/08/06 Support MSM8996(same freq table HMP(Gold, Silver))
+ *	 - Use opp table for voltage power efficiency
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -18,14 +21,22 @@
 #include <linux/notifier.h>
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/suspend.h>
 #include <linux/cpu.h>
-#ifdef CONFIG_CPU_FREQ_LIMIT_HMP
-#include <linux/sched.h>
-#endif
 
-/* cpu frequency table from qcom-cpufreq dt parse */
-static struct cpufreq_frequency_table *cpuftbl_L;
-static struct cpufreq_frequency_table *cpuftbl_b;
+#define MAX_BUF_SIZE	100
+#define MIN(a, b)     (((a) < (b)) ? (a) : (b))
+#define MAX(a, b)     (((a) > (b)) ? (a) : (b))
+
+/*
+ * reduce voltage gap between gold and silver cluster
+ * find optimal silver clock from voltage of gold clock
+ */
+#undef USE_MATCH_CPU_VOL_FREQ
+#if defined(USE_MATCH_CPU_VOL_FREQ)
+#define USE_MATCH_CPU_VOL_MAX_FREQ	/* max_limit, thermal case */
+#undef USE_MATCH_CPU_VOL_MIN_FREQ	/* min_limit, boosting case */
+#endif
 
 /* sched boost type from kernel/sched/sched.h */
 #define NO_BOOST 0
@@ -33,155 +44,119 @@ static struct cpufreq_frequency_table *cpuftbl_b;
 #define CONSERVATIVE_BOOST 2
 #define RESTRAINED_BOOST 3
 
-struct cpufreq_limit_handle {
-	struct list_head node;
-	unsigned long min;
-	unsigned long max;
-	char label[20];
-};
-
 static DEFINE_MUTEX(cpufreq_limit_lock);
 static LIST_HEAD(cpufreq_limit_requests);
 
-/**
- * cpufreq_limit_get - limit min_freq or max_freq, return cpufreq_limit_handle
- * @min_freq	limit minimum frequency (0: none)
- * @max_freq	limit maximum frequency (0: none)
- * @label	a literal description string of this request
- */
-struct cpufreq_limit_handle *cpufreq_limit_get(unsigned long min_freq,
-		unsigned long max_freq, char *label)
-{
-	struct cpufreq_limit_handle *handle;
-	int i;
+struct cpufreq_limit_parameter {
+	struct cpufreq_frequency_table *cpuftbl_L;
+	struct cpufreq_frequency_table *cpuftbl_b;
+	unsigned int	unified_cpuftbl[50];
+	unsigned int	freq_count;
+	bool		table_initialized;
 
-	if (max_freq && max_freq < min_freq)
-		return ERR_PTR(-EINVAL);
+	unsigned int	ltl_cpu_policy;
+	unsigned int	ltl_cpu_start;
+	unsigned int	ltl_cpu_end;
+	unsigned int	mid_cpu_policy;
+	unsigned int	big_cpu_policy;
+	unsigned int	big_cpu_start;
+	unsigned int	big_cpu_end;
 
-	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
-	if (!handle)
-		return ERR_PTR(-ENOMEM);
+	unsigned int	big_min_freq;
+	unsigned int	big_max_freq;
+	unsigned int	ltl_min_freq;
+	unsigned int	ltl_max_freq;
 
-	handle->min = min_freq;
-	handle->max = max_freq;
+	unsigned int	ltl_min_lock;
+	unsigned int	ltl_divider;
 
-	if (strlen(label) < sizeof(handle->label))
-		strcpy(handle->label, label);
-	else
-		strncpy(handle->label, label, sizeof(handle->label) - 1);
-
-	pr_debug("%s: %s,%lu,%lu\n", __func__, handle->label, handle->min,
-			handle->max);
-
-	mutex_lock(&cpufreq_limit_lock);
-	list_add_tail(&handle->node, &cpufreq_limit_requests);
-	mutex_unlock(&cpufreq_limit_lock);
-
-	/* Re-evaluate policy to trigger adjust notifier for online CPUs */
-	get_online_cpus();
-
-	for_each_online_cpu(i)
-		cpufreq_update_policy(i);
-
-	put_online_cpus();
-
-	return handle;
-}
-
-/**
- * cpufreq_limit_put - release of a limit of min_freq or max_freq, free
- *			a cpufreq_limit_handle
- * @handle	a cpufreq_limit_handle that has been requested
- */
-int cpufreq_limit_put(struct cpufreq_limit_handle *handle)
-{
-	int i;
-
-	if (handle == NULL || IS_ERR(handle))
-		return -EINVAL;
-
-	pr_debug("%s: %s,%lu,%lu\n", __func__, handle->label, handle->min,
-			handle->max);
-
-	mutex_lock(&cpufreq_limit_lock);
-	list_del(&handle->node);
-	mutex_unlock(&cpufreq_limit_lock);
-
-	get_online_cpus();
-	for_each_online_cpu(i)
-		cpufreq_update_policy(i);
-	put_online_cpus();
-
-	kfree(handle);
-	return 0;
-}
-
-#ifdef CONFIG_CPU_FREQ_LIMIT_HMP
-struct cpufreq_limit_hmp {
-	unsigned int 		little_cpu_start;
-	unsigned int 		little_cpu_end;
-	unsigned int 		big_cpu_start;
-	unsigned int 		big_cpu_end;
-	unsigned long 		big_min_freq;
-	unsigned long 		big_max_freq;
-	unsigned long 		little_min_freq;
-	unsigned long 		little_max_freq;
-	unsigned long 		little_min_lock;
-	unsigned int		little_divider;
 	bool			use_hotplug_out;
-	unsigned int		hmp_boost_type;
-	unsigned int		hmp_boost_active;
-	int			hmp_prev_boost_type;
+	unsigned int	hmp_boost_type;
+	unsigned int	hmp_boost_active;
+	int				hmp_prev_boost_type;
+
+	/* set limit of max freq limit for guarantee performance */
+	unsigned int	ltl_limit_max_freq;
+
+	unsigned int	over_limit;
+	int				cur_orig_min;
+	int				cur_orig_max;
 };
 
-struct cpufreq_limit_hmp hmp_param = {
-/* SM7150 */
-#if defined (CONFIG_ARCH_SEC_SM7150)
-	.little_cpu_start 	= 0,
-	.little_cpu_end		= 5,
-	.big_cpu_start 		= 6,
-	.big_cpu_end		= 7,
-	.little_min_freq	= 288000,	/* divided value, not real clock */
-	.little_max_freq	= 902400,	/* divided value, not real clock */
-	.big_min_freq		= 979200,
-	.big_max_freq		= 2208000,
-	.little_min_lock	= 1209600 / 2, /* SVS_L1 */
+/* for SM8150 */
+struct cpufreq_limit_parameter param = {
+	.freq_count		= 0,
+	.table_initialized	= false,
 
-	.little_divider 	= 2,
-	.use_hotplug_out	= false,
-/* SM7125 */
-#elif defined (CONFIG_ARCH_ATOLL)
-	.little_cpu_start 	= 0,
-	.little_cpu_end		= 5,
-	.big_cpu_start 		= 6,
+	.ltl_cpu_policy		= 0,
+	.ltl_cpu_start		= 0,
+	.ltl_cpu_end		= 3,
+	.mid_cpu_policy		= 4,
+	.big_cpu_policy		= 7,
+	.big_cpu_start		= 4,
 	.big_cpu_end		= 7,
-	.little_min_freq	= 288000,	/* divided value, not real clock */
-	.little_max_freq	= 902400,	/* divided value, not real clock */
-	.big_min_freq		= 979200,
-	.big_max_freq		= 2323200,
-	.little_min_lock	= 1267200 / 2, /* SVS_L1 */
+	.ltl_min_freq		= 0,
+	.ltl_max_freq		= 0,
+	.big_min_freq		= 0,
+	.big_max_freq		= 0,
+	.ltl_min_lock		= 1113600 / 2, /* devide value is ltl_divider */
 
-	.little_divider 	= 2,
+	.ltl_divider		= 2,
 	.use_hotplug_out	= false,
-/* SM6150 */
-#else
-	.little_cpu_start 	= 0,
-	.little_cpu_end		= 5,
-	.big_cpu_start 		= 6,
-	.big_cpu_end		= 7,
-	.little_min_freq	= 288000,	/* divided value, not real clock */
-	.little_max_freq	= 854400,	/* divided value, not real clock */
-	.big_min_freq		= 979200,
-	.big_max_freq		= 2208000,
-	.little_min_lock	= 1209600 / 2, /* SVS_L1 */
 
-	.little_divider 	= 2,
-	.use_hotplug_out	= false,
-#endif
 	.hmp_boost_type		= CONSERVATIVE_BOOST,
 	.hmp_boost_active	= 0,
-	.hmp_prev_boost_type	= 0,
+	.hmp_prev_boost_type = 0,
+
+	.ltl_limit_max_freq	= 1113600,
+
+	.over_limit			= -1,
+	.cur_orig_min		= -1,
+	.cur_orig_max		= -1,
 };
+
+static struct cpufreq_limit_handle
+	cpufreq_limit_handle_list[DVFS_MAX_ID] = {
+	{
+		.name = "none",
+		.id = DVFS_NO_ID
+	},
+	{
+		.name = "touch",
+		.id = DVFS_TOUCH_ID
+	},
+	{
+		.name = "finger",
+		.id = DVFS_FINGER_ID
+	},
+	{
+		.name = "multi-touch",
+		.id = DVFS_MULTI_TOUCH_ID
+	},
+	{
+		.name = "argos",
+		.id = DVFS_ARGOS_ID
+	},
+#ifdef CONFIG_USB_AUDIO_ENHANCED_DETECT_TIME
+	{
+		.name = "boost-host",
+		.id = DVFS_BOOST_HOST_ID
+	},
+#endif
+	{
+		.name = "user_min",
+		.id = DVFS_USER_MIN_ID
+	},
+	{
+		.name = "user_max",
+		.id = DVFS_USER_MAX_ID
+	},
+};
+
+struct cpufreq_limit_handle *cpufreq_limit_get_handle(int id)
+{
+	return &cpufreq_limit_handle_list[id];
+}
 
 void cpufreq_limit_corectl(int freq)
 {
@@ -189,18 +164,18 @@ void cpufreq_limit_corectl(int freq)
 	bool bigout = false;
 
 	/* if div is 1, do not core control */
-	if (hmp_param.little_divider == 1)
+	if (param.ltl_divider == 1)
 		return;
 
-	if (!hmp_param.use_hotplug_out)
+	if (!param.use_hotplug_out)
 		return;
 
-	if ((freq > -1) && (freq < hmp_param.big_min_freq))
+	if ((freq > -1) && (freq < param.big_min_freq))
 		bigout = true;
 
 	for_each_possible_cpu(cpu) {
-		if ((cpu >= hmp_param.big_cpu_start) &&
-			(cpu <= hmp_param.big_cpu_end)) {
+		if ((cpu >= param.big_cpu_start) &&
+			(cpu <= param.big_cpu_end)) {
 
 			if (bigout)
 				cpu_down(cpu);
@@ -210,34 +185,141 @@ void cpufreq_limit_corectl(int freq)
 	}
 }
 
+static bool cpufreq_limit_make_table(void)
+{
+	int i, count = 0;
+	int freq_count = 0;
+	unsigned int freq;
+	bool ret = false;
+
+	/* big cluster table */
+	if (!param.cpuftbl_b)
+		goto little;
+
+	for (i = 0; param.cpuftbl_b[i].frequency != CPUFREQ_TABLE_END; i++)
+		count = i;
+
+	for (i = count; i >= 0; i--) {
+		freq = param.cpuftbl_b[i].frequency;
+
+		if (freq == CPUFREQ_ENTRY_INVALID)
+			continue;
+
+		if (freq < param.big_min_freq ||
+				freq > param.big_max_freq)
+			continue;
+
+		param.unified_cpuftbl[freq_count++] = freq;
+	}
+
+	/* if div is 1, use only big cluster freq table */
+	if (param.ltl_divider == 1)
+		goto done;
+
+little:
+	/* LITTLE cluster table */
+	if (!param.cpuftbl_L)
+		goto done;
+
+	for (i = 0; param.cpuftbl_L[i].frequency != CPUFREQ_TABLE_END; i++)
+		count = i;
+
+	for (i = count; i >= 0; i--) {
+		freq = param.cpuftbl_L[i].frequency / param.ltl_divider;
+
+		if (freq == CPUFREQ_ENTRY_INVALID)
+			continue;
+
+		if (freq < param.ltl_min_freq ||
+				freq > param.ltl_max_freq)
+			continue;
+
+		param.unified_cpuftbl[freq_count++] = freq;
+	}
+
+done:
+	if (freq_count) {
+		pr_debug("%s: unified table is made\n", __func__);
+		param.freq_count = freq_count;
+		ret = true;
+	} else {
+		pr_err("%s: cannot make unified table\n", __func__);
+	}
+
+	return ret;
+}
 
 /**
  * cpufreq_limit_set_table - cpufreq table from dt via qcom-cpufreq
  */
-void cpufreq_limit_set_table(int cpu, struct cpufreq_frequency_table * ftbl)
+void cpufreq_limit_set_table(int cpu, struct cpufreq_frequency_table *ftbl)
 {
 	int i, count = 0;
-	unsigned int max_freq = 0;
+	unsigned int max_freq_b = 0, min_freq_b = UINT_MAX;
+	unsigned int max_freq_l = 0, min_freq_l = UINT_MAX;
 
-	if (cpu == hmp_param.big_cpu_start) {
-		cpuftbl_b = ftbl;
+	if (param.table_initialized)
+		return;
 
-		/* update max freq of big cluster */
-		for (i = 0; cpuftbl_b[i].frequency != CPUFREQ_TABLE_END; i++)
-			count = i;
+	if (cpu == param.ltl_cpu_policy)
+		param.cpuftbl_L = ftbl;
+	else if (cpu == param.big_cpu_policy)
+		param.cpuftbl_b = ftbl;
 
-		for (i = count; i >= 0; i--) {
-			if (cpuftbl_b[i].frequency > max_freq)
-				max_freq = cpuftbl_b[i].frequency;
+	if (!param.cpuftbl_L)
+		return;
 
-			if (cpuftbl_b[i].frequency == CPUFREQ_ENTRY_INVALID)
-				continue;
-		}
-		hmp_param.big_max_freq = max_freq;
-		pr_info("%s: max freq of big: %lu\n", __func__, hmp_param.big_max_freq);
-	} else if (cpu == hmp_param.little_cpu_start) {
-		cpuftbl_L = ftbl;
+	if (!param.cpuftbl_b)
+		return;
+
+	pr_info("%s: freq table is ready, update config\n", __func__);
+
+	/* update little config */
+	for (i = 0; param.cpuftbl_L[i].frequency != CPUFREQ_TABLE_END; i++)
+		count = i;
+
+	for (i = count; i >= 0; i--) {
+		if (param.cpuftbl_L[i].frequency == CPUFREQ_ENTRY_INVALID)
+			continue;
+
+		if (param.cpuftbl_L[i].frequency < min_freq_l)
+			min_freq_l = param.cpuftbl_L[i].frequency;
+
+		if (param.cpuftbl_L[i].frequency > max_freq_l)
+			max_freq_l = param.cpuftbl_L[i].frequency;
 	}
+
+	if (!param.ltl_min_freq)
+		param.ltl_min_freq = min_freq_l / param.ltl_divider;
+	if (!param.ltl_max_freq)
+		param.ltl_max_freq = max_freq_l / param.ltl_divider;
+
+	/* update big config */
+	for (i = 0; param.cpuftbl_b[i].frequency != CPUFREQ_TABLE_END; i++)
+		count = i;
+
+	for (i = count; i >= 0; i--) {
+		if (param.cpuftbl_b[i].frequency == CPUFREQ_ENTRY_INVALID)
+			continue;
+
+		if ((param.cpuftbl_b[i].frequency < min_freq_b) &&
+			(param.cpuftbl_b[i].frequency > param.ltl_max_freq))
+			min_freq_b = param.cpuftbl_b[i].frequency;
+
+		if (param.cpuftbl_b[i].frequency > max_freq_b)
+			max_freq_b = param.cpuftbl_b[i].frequency;
+	}
+
+	if (!param.big_min_freq)
+		param.big_min_freq = min_freq_b;
+	if (!param.big_max_freq)
+		param.big_max_freq = max_freq_b;
+
+	pr_info("%s: updated: little(%u-%u), big(%u-%u)\n", __func__,
+			param.ltl_min_freq, param.ltl_max_freq,
+			param.big_min_freq, param.big_max_freq);
+
+	param.table_initialized = cpufreq_limit_make_table();
 }
 
 /**
@@ -247,55 +329,17 @@ void cpufreq_limit_set_table(int cpu, struct cpufreq_frequency_table * ftbl)
 ssize_t cpufreq_limit_get_table(char *buf)
 {
 	ssize_t len = 0;
-	int i, count = 0;
-	unsigned int freq;
+	int i = 0;
 
-	/* big cluster table */
-	if (!cpuftbl_b)
-		goto little;
+	if (!param.freq_count)
+		return len;
 
-	for (i = 0; cpuftbl_b[i].frequency != CPUFREQ_TABLE_END; i++)
-		count = i;
+	for (i = 0; i < param.freq_count; i++)
+		len += snprintf(buf + len, MAX_BUF_SIZE, "%u ",
+					param.unified_cpuftbl[i]);
 
-	for (i = count; i >= 0; i--) {
-		freq = cpuftbl_b[i].frequency;
-
-		if (freq == CPUFREQ_ENTRY_INVALID)
-			continue;
-
-		if (freq < hmp_param.big_min_freq || freq > hmp_param.big_max_freq)
-			continue;
-
-		len += sprintf(buf + len, "%u ", freq);
-	}
-
-	/* if div is 1, use only big cluster freq table */
-	if (hmp_param.little_divider == 1)
-		goto done;
-
-little:
-	/* LITTLE cluster table */
-	if (!cpuftbl_L)
-		goto done;
-
-	for (i = 0; cpuftbl_L[i].frequency != CPUFREQ_TABLE_END; i++)
-		count = i;
-
-	for (i = count; i >= 0; i--) {
-		freq = cpuftbl_L[i].frequency / hmp_param.little_divider;
-
-		if (freq == CPUFREQ_ENTRY_INVALID)
-			continue;
-
-		if (freq < hmp_param.little_min_freq || freq > hmp_param.little_max_freq)
-			continue;
-
-		len += sprintf(buf + len, "%u ", freq);
-	}
-
-done:
 	len--;
-	len += sprintf(buf + len, "\n");
+	len += snprintf(buf + len, MAX_BUF_SIZE, "\n");
 
 	pr_info("%s: %s\n", __func__, buf);
 
@@ -304,51 +348,70 @@ done:
 
 static inline int is_little(unsigned int cpu)
 {
-	return cpu >= hmp_param.little_cpu_start &&
-			cpu <= hmp_param.little_cpu_end;
+	return cpu >= param.ltl_cpu_start &&
+			cpu <= param.ltl_cpu_end;
 }
 
 static inline int is_big(unsigned int cpu)
 {
-	return cpu >= hmp_param.big_cpu_start &&
-			cpu <= hmp_param.big_cpu_end;
+	return cpu >= param.big_cpu_start &&
+			cpu <= param.big_cpu_end;
 }
 
+static int set_ltl_divider(struct cpufreq_policy *policy, unsigned long *v)
+{
+	if (is_little(policy->cpu))
+		*v /= param.ltl_divider;
+
+	return 0;
+}
 
 static int cpufreq_limit_hmp_boost(int enable)
 {
 	unsigned int ret = 0;
 
-	pr_debug("%s: enable=%d, prev_type=%d, type=%d, active=%d\n", __func__,
-		enable, hmp_param.hmp_prev_boost_type, hmp_param.hmp_boost_type, hmp_param.hmp_boost_active);
+	pr_debug("%s: enable=%d, prev_type=%d, type=%d, active=%d\n",
+		__func__, enable,
+		param.hmp_prev_boost_type, param.hmp_boost_type,
+		param.hmp_boost_active);
 
 	if (enable) {
-		if ((hmp_param.hmp_boost_type && !hmp_param.hmp_boost_active) ||
-			(hmp_param.hmp_boost_active && (hmp_param.hmp_boost_type != hmp_param.hmp_prev_boost_type))) {
-			hmp_param.hmp_boost_active = enable;
+		if ((param.hmp_boost_type && !param.hmp_boost_active) ||
+			(param.hmp_boost_active &&
+			(param.hmp_boost_type !=
+				param.hmp_prev_boost_type))) {
+			param.hmp_boost_active = enable;
 
-			// Release previous boost type before enable new boost type.
-			if(hmp_param.hmp_prev_boost_type != NO_BOOST) {
-				ret = sched_set_boost(hmp_param.hmp_prev_boost_type * -1);
+			/* release previous boost type
+			 * before enable new boost type
+			 */
+			if (param.hmp_prev_boost_type != NO_BOOST) {
+				ret = sched_set_boost(
+					param.hmp_prev_boost_type * -1);
 				if (ret)
-					pr_err("%s: HMP boost enable failed\n", __func__);
+					pr_err("%s: HMP boost enable failed\n",
+								__func__);
 			}
 
-			// Set prev boost type
-			hmp_param.hmp_prev_boost_type = hmp_param.hmp_boost_type;
+			/* set prev boost type */
+			param.hmp_prev_boost_type =
+					param.hmp_boost_type;
 
 			ret = sched_set_boost(CONSERVATIVE_BOOST);
 			if (ret)
-				pr_err("%s: HMP boost enable failed\n", __func__);
+				pr_err("%s: HMP boost enable failed\n",
+								__func__);
 		}
 	} else {
-		if (hmp_param.hmp_boost_type && hmp_param.hmp_boost_active) {
-			hmp_param.hmp_boost_active = 0;
-			ret = sched_set_boost(hmp_param.hmp_prev_boost_type * -1);
-			hmp_param.hmp_prev_boost_type = NO_BOOST;
-			hmp_param.hmp_boost_type = CONSERVATIVE_BOOST;
+		if (param.hmp_boost_type && param.hmp_boost_active) {
+			param.hmp_boost_active = 0;
+			ret = sched_set_boost(
+				param.hmp_prev_boost_type * -1);
+			param.hmp_prev_boost_type = NO_BOOST;
+			param.hmp_boost_type = CONSERVATIVE_BOOST;
 			if (ret)
-				pr_err("%s: HMP boost disable failed\n", __func__);
+				pr_err("%s: HMP boost disable failed\n",
+								__func__);
 		}
 	}
 
@@ -360,91 +423,118 @@ static int cpufreq_limit_adjust_freq(struct cpufreq_policy *policy,
 {
 	unsigned int hmp_boost_active = 0;
 
-	pr_debug("%s+: cpu=%d, min=%ld, max=%ld\n", __func__, policy->cpu, *min, *max);
+	pr_debug("%s+: cpu%d, min(%lu), max(%lu)\n", __func__,
+					policy->cpu, *min, *max);
 
 	if (is_little(policy->cpu)) {
-		if (*min==0)
-			*min = policy->cpuinfo.min_freq;
-		else if (*min >= hmp_param.big_min_freq)
-			*min = hmp_param.little_min_lock * hmp_param.little_divider;
+		if (*min >= param.big_min_freq)
+			*min = param.ltl_min_lock * param.ltl_divider;
 		else
-			*min *= hmp_param.little_divider;
+			*min *= param.ltl_divider;
 
-		if (*max >= hmp_param.big_min_freq || *max==ULONG_MAX)
-			*max = policy->cpuinfo.max_freq;
+		if (*max >= param.big_min_freq)
+			*max = policy->user_policy.max;
 		else
-			*max *= hmp_param.little_divider;
+			*max *= param.ltl_divider;
 	} else {
-		if (*min >= hmp_param.big_min_freq) {
+		if (*min >= param.big_min_freq) {
 			hmp_boost_active = 1;
-			hmp_param.hmp_boost_type = CONSERVATIVE_BOOST;
+			param.hmp_boost_type = CONSERVATIVE_BOOST;
 		} else {
-			*min = policy->cpuinfo.min_freq;
+			*min = policy->user_policy.min;
 			hmp_boost_active = 0;
 		}
 
-		if (*max==ULONG_MAX) {
-			*max = policy->cpuinfo.max_freq;
-		} else if (*max >= hmp_param.big_min_freq) {
-			pr_debug("%s: big_min_freq=%ld, max=%ld\n", __func__,
-				hmp_param.big_min_freq, *max);
+		if (*max >= param.big_min_freq) {
+			pr_debug("%s: big_min_freq(%u), max(%lu)\n", __func__,
+				param.big_min_freq, *max);
 		} else {
-			*max = policy->cpuinfo.min_freq;
+			*max = policy->user_policy.min;
 			hmp_boost_active = 0;
 		}
 
 		cpufreq_limit_hmp_boost(hmp_boost_active);
 	}
 
-	pr_debug("%s-: cpu=%d, min=%ld, max=%ld\n", __func__, policy->cpu, *min, *max);
+	pr_debug("%s-: cpu%d, min(%lu), max(%lu)\n", __func__,
+					policy->cpu, *min, *max);
 
 	return 0;
 }
-#else
-void cpufreq_limit_corectl(int freq) { }
-static inline int cpufreq_limit_adjust_freq(struct cpufreq_policy *policy,
-		unsigned long *min, unsigned long *max) { return 0; }
-static inline int cpufreq_limit_hmp_boost(int enable) { return 0; }
 
-void cpufreq_limit_set_table(int cpu, struct cpufreq_frequency_table * ftbl)
+int cpufreq_limit_get(unsigned long freq,
+						struct cpufreq_limit_handle *handle)
 {
-	cpuftbl_b = ftbl;
-	cpuftbl_L = 0;
-}
+	ktime_t curr_time;
+	u64 msecs64;
 
-/**
- * cpufreq_limit_get_table - fill the cpufreq table to support HMP
- * @buf		a buf that has been requested to fill the cpufreq table
- */
-ssize_t cpufreq_limit_get_table(char *buf)
-{
-	ssize_t len = 0;
-	int i, count = 0;
-	unsigned int freq;
+	if (!param.table_initialized)
+		return -EAGAIN;
 
-	if (cpuftbl_b == NULL)
-		return 0;
+	mutex_lock(&cpufreq_limit_lock);
 
-	for (i = 0; cpuftbl_b[i].frequency != CPUFREQ_TABLE_END; i++)
-		count = i;
-
-	for (i = count; i >= 0; i--) {
-		freq = cpuftbl_b[i].frequency;
-
-		if (freq == CPUFREQ_ENTRY_INVALID)
-			continue;
-
-		len += sprintf(buf + len, "%u ", freq);
+	handle->freq = freq;
+	curr_time = ktime_get();
+	msecs64 = ktime_to_ns(curr_time);
+	do_div(msecs64, NSEC_PER_MSEC);
+	handle->start_msecs = msecs64;
+	if (!handle->requested) {
+		list_add_tail(&handle->node, &cpufreq_limit_requests);
+		handle->requested = true;
 	}
 
-	len--;
-	len += sprintf(buf + len, "\n");
+	pr_debug("%s: %s, %lu\n", __func__, handle->name, handle->freq);
 
-	pr_info("%s: %s", __func__, buf);
+	mutex_unlock(&cpufreq_limit_lock);
 
-	return len;
+	cpufreq_update_policy(param.ltl_cpu_policy);
+	cpufreq_update_policy(param.mid_cpu_policy);
+	cpufreq_update_policy(param.big_cpu_policy);
+
+	return 0;
 }
-#endif /* CONFIG_CPU_FREQ_LIMIT_HMP */
+
+int cpufreq_limit_put(struct cpufreq_limit_handle *handle)
+{
+	pr_debug("%s: %s, %lu\n", __func__, handle->name, handle->freq);
+
+	mutex_lock(&cpufreq_limit_lock);
+	if (handle->requested) {
+		list_del(&handle->node);
+		handle->requested = false;
+	}
+	mutex_unlock(&cpufreq_limit_lock);
+
+	cpufreq_update_policy(param.ltl_cpu_policy);
+	cpufreq_update_policy(param.mid_cpu_policy);
+	cpufreq_update_policy(param.big_cpu_policy);
+
+	return 0;
+}
+
+int cpufreq_limit_get_cur_min(void)
+{
+	return param.cur_orig_min;
+}
+
+int cpufreq_limit_get_cur_max(void)
+{
+	return param.cur_orig_max;
+}
+
+void cpufreq_limit_set_over_limit(unsigned int val)
+{
+	param.over_limit = val;
+
+	cpufreq_update_policy(param.ltl_cpu_policy);
+	cpufreq_update_policy(param.mid_cpu_policy);
+	cpufreq_update_policy(param.big_cpu_policy);
+}
+
+unsigned int cpufreq_limit_get_over_limit(void)
+{
+	return param.over_limit;
+}
 
 static int cpufreq_limit_notifier_policy(struct notifier_block *nb,
 		unsigned long val, void *data)
@@ -452,47 +542,88 @@ static int cpufreq_limit_notifier_policy(struct notifier_block *nb,
 	struct cpufreq_policy *policy = data;
 	struct cpufreq_limit_handle *handle;
 	unsigned long min = 0, max = ULONG_MAX;
+	int min_id = DVFS_NO_ID;
+#if defined(USE_MATCH_CPU_VOL_MIN_FREQ)
+	unsigned long adjust_min = 0;
+#endif
+#if defined(USE_MATCH_CPU_VOL_MAX_FREQ)
+	unsigned long adjust_max = 0;
+#endif
 
 	if (val != CPUFREQ_ADJUST)
 		goto done;
 
 	mutex_lock(&cpufreq_limit_lock);
+
 	list_for_each_entry(handle, &cpufreq_limit_requests, node) {
-		if (handle->min > min)
-			min = handle->min;
-		if (handle->max && handle->max < max)
-			max = handle->max;
+		if (handle->id == DVFS_USER_MAX_ID && handle->freq < max)
+			max = handle->freq;
+		else if (handle->freq > min) {
+			min = handle->freq;
+			min_id = handle->id;
+		}
 	}
 
-#ifdef CONFIG_SEC_PM
-	pr_debug("CPUFREQ(%d): %s: umin=%d,umax=%d  pmin=%d,pmax=%d\n",
+	pr_debug("++ CPUFREQ(%d): %s: user(%d ~ %d), pol(%d ~ %d), set(%lu ~ %lu), over(%d)\n",
 		policy->cpu, __func__,
-		policy->user_policy.min, policy->user_policy.max,
-		policy->min, policy->max);
-#endif
-/*
-	if (policy->user_policy.min > min)
-		min = policy->user_policy.min;
-	if (policy->user_policy.max && policy->user_policy.max < max)
-		max = policy->user_policy.max;
-*/
+		policy->user_policy.min, policy->user_policy.max, policy->min, policy->max, min, max, param.over_limit);
 
 	mutex_unlock(&cpufreq_limit_lock);
 
+#if defined(USE_MATCH_CPU_VOL_FREQ)
+	if (is_little(policy->cpu)) {
+#if defined(USE_MATCH_CPU_VOL_MIN_FREQ)
+		/* boost case */
+		if (min)
+			adjust_min = msm_match_cpu_voltage_btol(min);
+
+		if (adjust_min)
+			min = adjust_min;
+#endif
+#if defined(USE_MATCH_CPU_VOL_MAX_FREQ)
+		/* thermal case */
+		if (max && (max < param.ltl_max_freq) &&
+			(max >= param.ltl_limit_max_freq)) {
+			adjust_max = msm_match_cpu_voltage_btol(max);
+
+			if (adjust_max)
+				max = MAX(adjust_max,
+					param.ltl_limit_max_freq);
+		}
+#endif
+	}
+#endif
+
+	param.cur_orig_min = min;
+	param.cur_orig_max = max;
+
 	if (!min && max == ULONG_MAX) {
 		cpufreq_limit_hmp_boost(0);
+		param.cur_orig_min = -1;
+		param.cur_orig_max = -1;
 		goto done;
 	}
 
+	if (!min) {
+		min = policy->user_policy.min;
+		set_ltl_divider(policy, &min);
+		param.cur_orig_min = -1;
+	}
+	if (max == ULONG_MAX) {
+		max = policy->user_policy.max;
+		set_ltl_divider(policy, &max);
+		param.cur_orig_max = -1;
+	}
+
 	/*
-	 * little_divider 1 means,
+	 * ltl_divider 1 means,
 	 * little and big has similar power and performance case
 	 * e.g. MSM8996 silver and gold
 	 */
-	if (hmp_param.little_divider == 1) {
+	if (param.ltl_divider == 1) {
 		if (is_big(policy->cpu)) {
 			/* sched_boost scenario */
-			if (min > hmp_param.little_max_freq)
+			if (min > param.ltl_max_freq)
 				cpufreq_limit_hmp_boost(1);
 			else
 				cpufreq_limit_hmp_boost(0);
@@ -504,11 +635,25 @@ static int cpufreq_limit_notifier_policy(struct notifier_block *nb,
 	pr_debug("%s: limiting cpu%d cpufreq to %lu-%lu\n", __func__,
 			policy->cpu, min, max);
 
+	/* for over limit */
+	if (param.over_limit != -1 && param.cur_orig_max != -1
+		&& (int)param.over_limit > param.cur_orig_max
+		&& (param.cur_orig_min >= param.big_min_freq)
+		&& (min_id == DVFS_USER_MIN_ID || min_id == DVFS_TOUCH_ID)) {
+		max = param.over_limit;
+
+		pr_debug("%s: min over max: cpu%d cpufreq to %lu-%lu\n", __func__,
+				policy->cpu, min, max);
+	}
+
 	cpufreq_verify_within_limits(policy, min, max);
 
 	pr_debug("%s: limited cpu%d cpufreq to %u-%u\n", __func__,
 			policy->cpu, policy->min, policy->max);
 done:
+	pr_debug("-- CPUFREQ(%d): %s: user(%d ~ %d), pol(%d ~ %d), set(%lu ~ %lu), over(%d)\n",
+		policy->cpu, __func__,
+		policy->user_policy.min, policy->user_policy.max, policy->min, policy->max, min, max, param.over_limit);
 	return 0;
 }
 
@@ -523,11 +668,24 @@ static ssize_t show_cpufreq_limit_requests(struct kobject *kobj,
 {
 	struct cpufreq_limit_handle *handle;
 	ssize_t len = 0;
+	ktime_t curr_time;
+	u64 msecs64, sincesecs64;
+
+	curr_time = ktime_get();
+	msecs64 = ktime_to_ns(curr_time);
+	do_div(msecs64, NSEC_PER_MSEC);
 
 	mutex_lock(&cpufreq_limit_lock);
+	len += snprintf(buf + len, MAX_BUF_SIZE,
+			"%s\t\t%s\t\t%s\n",
+			"name", "freq", "since");
+
 	list_for_each_entry(handle, &cpufreq_limit_requests, node) {
-		len += sprintf(buf + len, "%s\t%lu\t%lu\n", handle->label,
-				handle->min, handle->max);
+		sincesecs64 = msecs64 - handle->start_msecs;
+
+		len += snprintf(buf + len, MAX_BUF_SIZE,
+				"%s\t\t%lu\t\t%llu\n", handle->name,
+				handle->freq, sincesecs64);
 	}
 	mutex_unlock(&cpufreq_limit_lock);
 
@@ -535,58 +693,54 @@ static ssize_t show_cpufreq_limit_requests(struct kobject *kobj,
 }
 
 static struct kobj_attribute cpufreq_limit_requests_attr =
-	__ATTR(cpufreq_limit_requests, 0444, show_cpufreq_limit_requests, NULL);
+	__ATTR(requests, 0444, show_cpufreq_limit_requests, NULL);
 
-#ifdef CONFIG_CPU_FREQ_LIMIT_HMP
 #define MAX_ATTRIBUTE_NUM 12
 
-#define show_one(file_name, object)						\
-static ssize_t show_##file_name							\
-(struct kobject *kobj, struct kobj_attribute *attr, char *buf)			\
-{										\
-	return sprintf(buf, "%u\n", hmp_param.object);				\
+#define show_one(file_name, object)					\
+static ssize_t show_##file_name						\
+(struct kobject *kobj, struct kobj_attribute *attr, char *buf)		\
+{									\
+	return snprintf(buf, MAX_BUF_SIZE, "%u\n", param.object);	\
 }
 
-#define show_one_ulong(file_name, object)					\
-static ssize_t show_##file_name							\
-(struct kobject *kobj, struct kobj_attribute *attr, char *buf)			\
-{										\
-	return sprintf(buf, "%lu\n", hmp_param.object);			\
+#define store_one(file_name, object)					\
+static ssize_t store_##file_name					\
+(struct kobject *a, struct kobj_attribute *b, const char *buf, size_t count)\
+{									\
+	int ret;							\
+									\
+	ret = kstrtouint(buf, 0, &param.object);			\
+	if (ret != 1)							\
+		return -EINVAL;						\
+									\
+	return count;							\
 }
 
-#define store_one(file_name, object)						\
-static ssize_t store_##file_name						\
-(struct kobject *a, struct kobj_attribute *b, const char *buf, size_t count)		\
-{										\
-	int ret;								\
-										\
-	ret = sscanf(buf, "%lu", &hmp_param.object);				\
-	if (ret != 1)								\
-		return -EINVAL;							\
-										\
-	return count;								\
-}
-
-static ssize_t show_little_cpu_num(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+static ssize_t show_ltl_cpu_num(struct kobject *kobj,
+				struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u-%u\n", hmp_param.little_cpu_start, hmp_param.little_cpu_end);
+	return snprintf(buf, MAX_BUF_SIZE, "%u-%u\n",
+		param.ltl_cpu_start, param.ltl_cpu_end);
 }
 
-static ssize_t show_big_cpu_num(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+static ssize_t show_big_cpu_num(struct kobject *kobj,
+				struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u-%u\n", hmp_param.big_cpu_start, hmp_param.big_cpu_end);
+	return snprintf(buf, MAX_BUF_SIZE, "%u-%u\n",
+		param.big_cpu_start, param.big_cpu_end);
 }
 
-show_one_ulong(big_min_freq, big_min_freq);
-show_one_ulong(big_max_freq, big_max_freq);
-show_one_ulong(little_min_freq, little_min_freq);
-show_one_ulong(little_max_freq, little_max_freq);
-show_one_ulong(little_min_lock, little_min_lock);
-show_one(little_divider, little_divider);
+show_one(big_min_freq, big_min_freq);
+show_one(big_max_freq, big_max_freq);
+show_one(ltl_min_freq, ltl_min_freq);
+show_one(ltl_max_freq, ltl_max_freq);
+show_one(ltl_min_lock, ltl_min_lock);
+show_one(ltl_divider, ltl_divider);
 show_one(hmp_boost_type, hmp_boost_type);
 show_one(hmp_prev_boost_type, hmp_prev_boost_type);
 
-static ssize_t store_little_cpu_num(struct kobject *a, struct kobj_attribute *b,
+static ssize_t store_ltl_cpu_num(struct kobject *a, struct kobj_attribute *b,
 				const char *buf, size_t count)
 {
 	unsigned int input, input2;
@@ -601,8 +755,8 @@ static ssize_t store_little_cpu_num(struct kobject *a, struct kobj_attribute *b,
 
 	pr_info("%s: %u-%u, ret=%d\n", __func__, input, input2, ret);
 
-	hmp_param.little_cpu_start = input;
-	hmp_param.little_cpu_end = input2;
+	param.ltl_cpu_start = input;
+	param.ltl_cpu_end = input2;
 
 	return count;
 }
@@ -622,32 +776,32 @@ static ssize_t store_big_cpu_num(struct kobject *a, struct kobj_attribute *b,
 
 	pr_info("%s: %u-%u, ret=%d\n", __func__, input, input2, ret);
 
-	hmp_param.big_cpu_start = input;
-	hmp_param.big_cpu_end = input2;
+	param.big_cpu_start = input;
+	param.big_cpu_end = input2;
 
 	return count;
 }
 
 store_one(big_min_freq, big_min_freq);
 store_one(big_max_freq, big_max_freq);
-store_one(little_min_freq, little_min_freq);
-store_one(little_max_freq, little_max_freq);
-store_one(little_min_lock, little_min_lock);
+store_one(ltl_min_freq, ltl_min_freq);
+store_one(ltl_max_freq, ltl_max_freq);
+store_one(ltl_min_lock, ltl_min_lock);
 
-static ssize_t store_little_divider(struct kobject *a, struct kobj_attribute *b,
+static ssize_t store_ltl_divider(struct kobject *a, struct kobj_attribute *b,
 				const char *buf, size_t count)
 {
 	unsigned int input;
 	int ret;
 
-	ret = sscanf(buf, "%u", &input);
+	ret = kstrtouint(buf, 0, &input);
 	if (ret != 1)
 		return -EINVAL;
 
 	if (input >= MAX_ATTRIBUTE_NUM)
 		return -EINVAL;
 
-	hmp_param.little_divider = input;
+	param.ltl_divider = input;
 
 	return count;
 }
@@ -658,44 +812,35 @@ static ssize_t store_hmp_boost_type(struct kobject *a, struct kobj_attribute *b,
 	unsigned int input;
 	int ret;
 
-	ret = sscanf(buf, "%u", &input);
-	if (ret != 1)
-		return -EINVAL;
-
-	if (input > 2)
-		return -EINVAL;
-
-	hmp_param.hmp_boost_type = input;
+	ret = kstrtouint(buf, 0, &input);
+	param.hmp_boost_type = input;
 
 	return count;
 }
 
-define_one_global_rw(little_cpu_num);
+define_one_global_rw(ltl_cpu_num);
 define_one_global_rw(big_cpu_num);
 define_one_global_rw(big_min_freq);
 define_one_global_rw(big_max_freq);
-define_one_global_rw(little_min_freq);
-define_one_global_rw(little_max_freq);
-define_one_global_rw(little_min_lock);
-define_one_global_rw(little_divider);
+define_one_global_rw(ltl_min_freq);
+define_one_global_rw(ltl_max_freq);
+define_one_global_rw(ltl_min_lock);
+define_one_global_rw(ltl_divider);
 define_one_global_rw(hmp_boost_type);
 define_one_global_ro(hmp_prev_boost_type);
-#endif /* CONFIG_CPU_FREQ_LIMIT_HMP */
 
 static struct attribute *limit_attributes[] = {
 	&cpufreq_limit_requests_attr.attr,
-#ifdef CONFIG_CPU_FREQ_LIMIT_HMP
-	&little_cpu_num.attr,
+	&ltl_cpu_num.attr,
 	&big_cpu_num.attr,
 	&big_min_freq.attr,
 	&big_max_freq.attr,
-	&little_min_freq.attr,
-	&little_max_freq.attr,
-	&little_min_lock.attr,
-	&little_divider.attr,
+	&ltl_min_freq.attr,
+	&ltl_max_freq.attr,
+	&ltl_min_lock.attr,
+	&ltl_divider.attr,
 	&hmp_boost_type.attr,
 	&hmp_prev_boost_type.attr,
-#endif
 	NULL,
 };
 
@@ -715,7 +860,7 @@ static int __init cpufreq_limit_init(void)
 		return ret;
 
 	if (cpufreq_global_kobject) {
-		pr_info("%s: sysfs_create_group\n", __func__);
+		pr_debug("%s: sysfs_create_group\n", __func__);
 		ret = sysfs_create_group(cpufreq_global_kobject,
 				&limit_attr_group);
 		if (ret)
