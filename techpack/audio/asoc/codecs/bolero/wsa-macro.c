@@ -15,7 +15,6 @@
 #include <linux/io.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
-#include <linux/thermal.h>
 #include <linux/clk-provider.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
@@ -247,8 +246,6 @@ struct wsa_macro_priv {
 	int is_softclip_on[WSA_MACRO_SOFTCLIP_MAX];
 	int softclip_clk_users[WSA_MACRO_SOFTCLIP_MAX];
 	struct wsa_macro_bcl_pmic_params bcl_pmic_params;
-	struct thermal_cooling_device *tcdev;
-	unsigned long thermal_cur_state;
 	int wsa_digital_mute_status[WSA_MACRO_RX_MAX];
 };
 
@@ -1015,7 +1012,7 @@ static int wsa_macro_event_handler(struct snd_soc_codec *codec, u16 event,
 		swrm_wcd_notify(
 			wsa_priv->swr_ctrl_data[0].wsa_swr_pdev,
 			SWR_DEVICE_SSR_UP, NULL);
-			break;
+		break;
 	case BOLERO_MACRO_EVT_CLK_RESET:
 		wsa_macro_mclk_reset(wsa_dev);
 		break;
@@ -2144,9 +2141,9 @@ static int wsa_macro_rx_mux_put(struct snd_kcontrol *kcontrol,
 	case 0:
 		if (wsa_priv->active_ch_cnt[aif_rst]) {
 			clear_bit(bit_input,
-				&wsa_priv->active_ch_mask[aif_rst]);
+				  &wsa_priv->active_ch_mask[aif_rst]);
 			wsa_priv->active_ch_cnt[aif_rst]--;
-		}		
+		}
 		break;
 	case 1:
 	case 2:
@@ -2263,12 +2260,12 @@ static const struct snd_kcontrol_new wsa_macro_snd_controls[] = {
 			WSA_MACRO_SOFTCLIP1, 1, 0,
 			wsa_macro_soft_clip_enable_get,
 			wsa_macro_soft_clip_enable_put),
-	SOC_SINGLE_SX_TLV("WSA_RX0 Digital Volume",
+	SOC_SINGLE_S8_TLV("WSA_RX0 Digital Volume",
 			  BOLERO_CDC_WSA_RX0_RX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("WSA_RX1 Digital Volume",
+			  -84, 40, digital_gain),
+	SOC_SINGLE_S8_TLV("WSA_RX1 Digital Volume",
 			  BOLERO_CDC_WSA_RX1_RX_VOL_CTL,
-			  0, -84, 40, digital_gain),
+			  -84, 40, digital_gain),
 	SOC_SINGLE_EXT("WSA_RX0 Digital Mute", SND_SOC_NOPM, WSA_MACRO_RX0, 1,
 			0, wsa_macro_get_rx_mute_status,
 			wsa_macro_set_rx_mute_status),
@@ -2779,72 +2776,6 @@ exit:
 	return ret;
 }
 
-/* Thermal Functions */
-static int wsa_macro_get_max_state(struct thermal_cooling_device *cdev,
-					unsigned long *state)
-{
-	pr_debug("%s: Max_state: 1\n", __func__);
-	*state = 2;
-	return 0;
-}
-
-static int wsa_macro_get_cur_state(struct thermal_cooling_device *cdev,
-					unsigned long *state)
-{
-	struct wsa_macro_priv *wsa_priv = cdev->devdata;
-
-	if (!wsa_priv) {
-		pr_err("%s: cdev->devdata is NULL\n", __func__);
-		return -EINVAL;
-	}
-	*state = wsa_priv->thermal_cur_state;
-
-	pr_debug("%s: thermal current state:%lu\n", __func__, *state);
-	return 0;
-}
-
-static int wsa_macro_set_cur_state(struct thermal_cooling_device *cdev,
-					unsigned long state)
-{
-	struct wsa_macro_priv *wsa_priv = cdev->devdata;
-
-	pr_debug("%s: requested state:%lu\n", __func__, state);
-	if (!wsa_priv) {
-		pr_err("%s: cdev->devdata is NULL\n", __func__);
-		return -EINVAL;
-	}
-
-	wsa_priv->thermal_cur_state = state;
-
-	if (wsa_priv->thermal_cur_state == 0x1) {
-		pr_debug("%s: Set codec attenuation to -2dB\n", __func__);
-		snd_soc_update_bits(wsa_priv->codec,
-			BOLERO_CDC_WSA_RX0_RX_VOL_CTL, 0xFF, 0xFE);
-		snd_soc_update_bits(wsa_priv->codec,
-			BOLERO_CDC_WSA_RX1_RX_VOL_CTL, 0xFF, 0xFE);
-	} else if (wsa_priv->thermal_cur_state == 0x2) {
-		pr_debug("%s: Set codec attenuation to -5dB\n", __func__);
-		snd_soc_update_bits(wsa_priv->codec,
-			BOLERO_CDC_WSA_RX0_RX_VOL_CTL, 0xFF, 0xFB);
-		snd_soc_update_bits(wsa_priv->codec,
-			BOLERO_CDC_WSA_RX1_RX_VOL_CTL, 0xFF, 0xFB);
-	} else {
-		pr_debug("%s: Reset codec attenuation\n", __func__);
-		snd_soc_update_bits(wsa_priv->codec,
-			BOLERO_CDC_WSA_RX0_RX_VOL_CTL, 0xFF, 0x00);
-		snd_soc_update_bits(wsa_priv->codec,
-			BOLERO_CDC_WSA_RX1_RX_VOL_CTL, 0xFF, 0x00);
-	}
-
-	return 0;
-}
-
-static struct thermal_cooling_device_ops wsa_cooling_ops = {
-	.get_max_state = wsa_macro_get_max_state,
-	.get_cur_state = wsa_macro_get_cur_state,
-	.set_cur_state = wsa_macro_set_cur_state,
-};
-
 static int wsa_macro_init(struct snd_soc_codec *codec)
 {
 	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
@@ -2906,18 +2837,6 @@ static int wsa_macro_init(struct snd_soc_codec *codec)
 	wsa_priv->codec = codec;
 	wsa_priv->spkr_gain_offset = WSA_MACRO_GAIN_OFFSET_0_DB;
 	wsa_macro_init_reg(codec);
-	
-	wsa_priv->tcdev = thermal_of_cooling_device_register(
-						wsa_priv->dev->of_node,
-						"wsa", wsa_priv,
-						&wsa_cooling_ops);
-
-	if (IS_ERR(wsa_priv->tcdev)) {
-		dev_err(wsa_dev,
-			"%s: failed to register wsa macro as cooling device\n",
-			__func__);
-		wsa_priv->tcdev = NULL;
-	}
 
 	return 0;
 }
@@ -3165,8 +3084,6 @@ static int wsa_macro_remove(struct platform_device *pdev)
 	mutex_destroy(&wsa_priv->mclk_lock);
 	mutex_destroy(&wsa_priv->swr_clk_lock);
 	mutex_destroy(&wsa_priv->clk_lock);
-	if (wsa_priv->tcdev)
-		thermal_cooling_device_unregister(wsa_priv->tcdev);
 	return 0;
 }
 

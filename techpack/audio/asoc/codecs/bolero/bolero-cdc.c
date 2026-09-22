@@ -154,13 +154,12 @@ static int bolero_cdc_update_wcd_event(void *handle, u16 event, u32 data)
 			priv->macro_params[RX_MACRO].event_handler(priv->codec,
 				BOLERO_MACRO_EVT_IMPED_FALSE, data);
 		break;
-#ifdef CONFIG_SND_SOC_IMPED_SENSING
-	case SEC_WCD_BOLERO_EVT_IMPED_TRUE:
-		if (priv->macro_params[RX_MACRO].event_handler)
-			priv->macro_params[RX_MACRO].event_handler(priv->codec,
-				SEC_BOLERO_MACRO_EVT_IMPED_TRUE, data);
+	case WCD_BOLERO_EVT_BCS_CLK_OFF:
+		if (priv->macro_params[TX_MACRO].event_handler)
+			priv->macro_params[TX_MACRO].event_handler(
+				priv->codec,
+				BOLERO_MACRO_EVT_BCS_CLK_OFF, data);
 		break;
-#endif
 	default:
 		dev_err(priv->dev, "%s: Invalid event %d trigger from wcd\n",
 			__func__, event);
@@ -857,9 +856,12 @@ static void bolero_add_child_devices(struct work_struct *work)
 		}
 		pdev->dev.parent = priv->dev;
 		pdev->dev.of_node = node;
-		priv->dev->platform_data = platdata;
-		if (wcd937x_node) 
+
+		if (wcd937x_node) {
+			priv->dev->platform_data = platdata;
 			priv->wcd_dev = &pdev->dev;
+		}
+
 		ret = platform_device_add(pdev);
 		if (ret) {
 			dev_err(&pdev->dev,
@@ -927,6 +929,7 @@ static int bolero_probe(struct platform_device *pdev)
 	priv->read_dev = __bolero_reg_read;
 	priv->write_dev = __bolero_reg_write;
 
+	BLOCKING_INIT_NOTIFIER_HEAD(&priv->notifier);
 	priv->plat_data.handle = (void *) priv;
 	priv->plat_data.update_wcd_event = bolero_cdc_update_wcd_event;
 	priv->plat_data.register_notifier = bolero_cdc_register_notifier;

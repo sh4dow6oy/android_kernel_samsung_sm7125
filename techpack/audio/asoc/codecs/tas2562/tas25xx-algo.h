@@ -82,7 +82,7 @@ struct tas25xx_algo
 static ssize_t tas25xx_calib_calibration_store(struct device *dev,
 					struct device_attribute *attr,
 					const char *buf, size_t size);
-					
+
 static ssize_t tas25xx_calib_calibration_show(struct device *dev,
 					struct device_attribute *attr,
 					char *buf);

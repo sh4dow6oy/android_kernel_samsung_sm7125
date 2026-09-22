@@ -14,7 +14,7 @@
  * Description	: TI Smartamp algorithm control interface
  *
  */
-//#ifdef CONFIG_TAS25XX_ALGO
+#ifdef CONFIG_TAS25XX_ALGO
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -412,6 +412,7 @@ static void calib_work_routine(struct work_struct *work)
 		{
 			if(calibration_result[iter] == STATUS_SUCCESS)
 				continue;
+
 			/*Calinration Init*/
 			data = 1;/*Value is ignored*/
 			param_id = (TAS_SA_CALIB_INIT)|((iter+1)<<24)|(1<<16);
@@ -440,15 +441,18 @@ static void calib_work_routine(struct work_struct *work)
 				if(tas25xx_check_limits(iter, calib_re[iter]))
 					pr_info("[TI-SmartPA:%s] Calibration Pass Channel No:%d", __func__, iter);
 			}
+
 			/*Calibration De-Init*/
 			data = 1;//Value is ignored
 			param_id = (TAS_SA_CALIB_DEINIT)|((iter+1)<<24)|(1<<16);
-			ret = afe_smartamp_algo_ctrl((u8*)&data, param_id, TAS_SET_PARAM, sizeof(uint32_t), AFE_SMARTAMP_MODULE_RX);
+			ret = afe_smartamp_algo_ctrl((u8*)&data, param_id
+				, TAS_SET_PARAM, sizeof(uint32_t), AFE_SMARTAMP_MODULE_RX);
 			/*Wait some time*/
 			msleep(200);
 		}
 	}
 	tas25xx_save_calib_data(calib_re);
+
 	calibration_status = 0;
 	return;
 }
@@ -1112,4 +1116,4 @@ MODULE_AUTHOR("Texas Instruments Inc.");
 MODULE_DESCRIPTION("TAS25XX Algorithm");
 MODULE_LICENSE("GPL v2");
 
-//#endif /*CONFIG_TAS25XX_ALGO*/
+#endif /*CONFIG_TAS25XX_ALGO*/
