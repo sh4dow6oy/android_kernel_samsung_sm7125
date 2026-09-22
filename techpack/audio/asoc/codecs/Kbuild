@@ -122,7 +122,6 @@ ifdef CONFIG_SND_SOC_WSA881X
 	WSA881X_OBJS += wsa881x-tables.o
 	WSA881X_OBJS += wsa881x-regmap.o
 	WSA881X_OBJS += wsa881x-temp-sensor.o
-	WSA881X_OBJS += bigdata_wsa_sysfs_cb.o
 endif
 
 ifdef CONFIG_SND_SOC_WSA881X_ANALOG
@@ -164,7 +163,7 @@ ifdef CONFIG_SND_SOC_WCD_IRQ
 	CORE_OBJS += wcd-irq.o
 endif
 
-LINUX_INC +=	-I$(srctree)/include/linux
+LINUX_INC +=	-Iinclude/linux
 
 INCS +=		$(COMMON_INC) \
 		$(UAPI_INC)

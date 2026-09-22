@@ -131,7 +131,7 @@ do {                                                    \
 
 #define WCD_MBHC_JACK_MASK (SND_JACK_HEADSET | SND_JACK_OC_HPHL | \
 			   SND_JACK_OC_HPHR | SND_JACK_LINEOUT | \
-			   SND_JACK_MECHANICAL | SND_JACK_MICROPHONE2 | \
+			   SND_JACK_MECHANICAL | \
 			   SND_JACK_UNSUPPORTED)
 
 #define WCD_MBHC_JACK_BUTTON_MASK (SND_JACK_BTN_0 | SND_JACK_BTN_1 | \
@@ -222,8 +222,7 @@ enum wcd_mbhc_register_function {
 	WCD_MBHC_ADC_MODE,
 	WCD_MBHC_DETECTION_DONE,
 	WCD_MBHC_ELECT_ISRC_EN,
-	WCD_MBHC_EN_SURGE_PROTECTION_HPHL,
-	WCD_MBHC_EN_SURGE_PROTECTION_HPHR,
+	WCD_MBHC_NOISE_FILT_CTRL,
 	WCD_MBHC_REG_FUNC_MAX,
 };
 
@@ -611,20 +610,18 @@ struct wcd_mbhc {
 
 	unsigned long intr_status;
 	bool is_hph_ocp_pending;
-#if defined(CONFIG_SND_SOC_WCD_MBHC_SLOW_DET)
-	bool slow_insertion;
-#endif
 	bool usbc_force_pr_mode;
+
 	struct wcd_mbhc_fn *mbhc_fn;
 	bool force_linein;
 	int usbc_mode;
 	struct device_node *fsa_np;
 	struct notifier_block fsa_nb;
-
 	bool pullup_enable;
-#ifdef CONFIG_SND_SOC_IMPED_SENSING
-	int default_impedance_offset;
 	int impedance_offset;
+#if defined(CONFIG_SND_SOC_WCD_MBHC_SLOW_DET)
+	int default_impedance_offset;
+	bool slow_insertion;
 #endif
 	struct notifier_block psy_nb;
 	struct power_supply *usb_psy;
