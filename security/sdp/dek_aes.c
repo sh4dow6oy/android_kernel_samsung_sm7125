@@ -132,7 +132,6 @@ int dek_aes_decrypt(kek_t *kek, unsigned char *src, unsigned char *dst, int len)
 		return -ENOMEM;
 }
 
-
 int dek_aes_encrypt_key(kek_t *kek, unsigned char *key, unsigned int key_len,
 						unsigned char *out, unsigned int *out_len)
 {
