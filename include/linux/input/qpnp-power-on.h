@@ -50,7 +50,6 @@ enum pon_power_off_type {
 	PON_POWER_OFF_WARM_RESET	= PON_POWER_OFF_TYPE_WARM_RESET,
 	PON_POWER_OFF_SHUTDOWN		= PON_POWER_OFF_TYPE_SHUTDOWN,
 	PON_POWER_OFF_HARD_RESET	= PON_POWER_OFF_TYPE_HARD_RESET,
-	PON_POWER_OFF_DVDD_HARD_RESET	= PON_POWER_OFF_TYPE_DVDD_HARD_RESET,
 	PON_POWER_OFF_MAX_TYPE		= 0x10,
 };
 
@@ -69,10 +68,11 @@ enum pon_restart_reason {
 };
 #endif
 
-
 #ifdef CONFIG_SEC_PM
 int qpnp_pon_check_chg_det(void);
 ssize_t sec_get_pwrsrc(char *buf);
+int qpnp_control_s2_reset_onoff(int on);
+int qpnp_get_s2_reset_onoff(void);
 char* qpnp_pon_get_off_reason(void);
 #endif
 
@@ -83,6 +83,10 @@ int qpnp_pon_trigger_config(enum pon_trigger_source pon_src, bool enable);
 int qpnp_pon_wd_config(bool enable);
 int qpnp_pon_set_restart_reason(enum pon_restart_reason reason);
 bool qpnp_pon_check_hard_reset_stored(void);
+
+#ifdef CONFIG_SEC_PM
+int qpnp_set_resin_wk_int(int en);
+#endif /* CONFIG_SEC_PM */
 
 #else
 static int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
