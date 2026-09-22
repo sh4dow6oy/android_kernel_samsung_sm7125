@@ -14,9 +14,14 @@
  */
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/wakelock.h>
 #include "adsp.h"
-#define VENDOR "Sensortek"
-#define CHIP_ID "STK3031"
+#define VENDOR "AMS"
+#ifdef CONFIG_SUPPORT_TMD4907_FACTORY
+#define CHIP_ID "TMD4907"
+#else
+#define CHIP_ID "TMD4910"
+#endif
 
 #define PROX_AVG_COUNT 40
 #define PROX_ALERT_THRESHOLD 200
@@ -24,15 +29,16 @@
 #define PROX_TH_WRITE 1
 #define BUFFER_MAX 128
 #define PROX_REG_START 0x80
-
-#define CAL_DATA_FILE_PATH   "/efs/FactoryApp/prox_cal"
+#define PROX_DETECT_HIGH_TH 16368
+#define PROX_DETECT_LOW_TH 1000
 
 extern unsigned int system_rev;
 
-struct prox_data {
+struct tmd4903_prox_data {
 	struct hrtimer prox_timer;
 	struct work_struct work_prox;
 	struct workqueue_struct *prox_wq;
+	struct wake_lock prox_wake_lock;
 	struct adsp_data *dev_data;
 	int min;
 	int max;
@@ -42,8 +48,7 @@ struct prox_data {
 	int reg_backup[2];
 	short avgwork_check;
 	short avgtimer_enabled;
-	int high_detect_h;
-	int high_detect_l;
+	short bBarcodeEnabled;
 };
 
 enum {
@@ -53,11 +58,27 @@ enum {
 	PRX_THRESHOLD_RELEASE_L,
 };
 
-static struct prox_data *pdata;
+static struct tmd4903_prox_data *pdata;
 
 static int get_prox_sidx(struct adsp_data *data)
 {
-	return MSG_PROX;
+	int ret = MSG_PROX;
+#ifdef CONFIG_SUPPORT_DUAL_OPTIC
+	switch (data->fac_fstate) {
+	case FSTATE_INACTIVE:
+	case FSTATE_FAC_INACTIVE:
+		ret = MSG_PROX;
+		break;
+	case FSTATE_ACTIVE:
+	case FSTATE_FAC_ACTIVE:
+		ret = MSG_PROX_SUB;
+		break;
+	default:
+		break;
+	}
+#endif
+//	pr_info("[FACTORY] %s: idx:%d\n", __func__, ret);
+	return ret;
 }
 
 static ssize_t prox_vendor_show(struct device *dev,
@@ -80,6 +101,10 @@ static ssize_t prox_raw_data_show(struct device *dev,
 	if (pdata->avgwork_check == 0) {
 		if (get_prox_sidx(data) == MSG_PROX)
 			get_prox_raw_data(&pdata->val, &pdata->offset);
+#ifdef CONFIG_SUPPORT_DUAL_OPTIC
+		else
+			get_sub_prox_raw_data(&pdata->val, &pdata->offset);	
+#endif
 	}
 
 	return snprintf(buf, PAGE_SIZE, "%d\n", pdata->val);
@@ -132,7 +157,10 @@ static void prox_work_func(struct work_struct *work)
 
 		if (get_prox_sidx(pdata->dev_data) == MSG_PROX)
 			get_prox_raw_data(&pdata->val, &pdata->offset);
-
+#ifdef CONFIG_SUPPORT_DUAL_OPTIC
+		else
+			get_sub_prox_raw_data(&pdata->val, &pdata->offset);
+#endif
 		avg += pdata->val;
 
 		if (!i)
@@ -175,7 +203,7 @@ int get_prox_threshold(struct adsp_data *data, int type)
 
 	while (!(data->ready_flag[MSG_TYPE_GET_THRESHOLD] & 1 << prox_idx) &&
 		cnt++ < TIMEOUT_CNT)
-		msleep(20);
+		usleep_range(500, 550);
 
 	data->ready_flag[MSG_TYPE_GET_THRESHOLD] &= ~(1 << prox_idx);
 
@@ -206,7 +234,7 @@ void set_prox_threshold(struct adsp_data *data, int type, int val)
 
 	while (!(data->ready_flag[MSG_TYPE_SET_THRESHOLD] & 1 << prox_idx) &&
 		cnt++ < TIMEOUT_CNT)
-		msleep(20);
+		usleep_range(500, 550);
 
 	data->ready_flag[MSG_TYPE_SET_THRESHOLD] &= ~(1 << prox_idx);
 
@@ -216,151 +244,61 @@ void set_prox_threshold(struct adsp_data *data, int type, int val)
 	mutex_unlock(&data->prox_factory_mutex);
 }
 
-static int prox_read_cal_data(uint16_t *threshold)
-{
-	struct file *cal_data_filp = NULL;
-	int ret = 0;
-	mm_segment_t old_fs;
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-
-	cal_data_filp = filp_open(CAL_DATA_FILE_PATH, O_RDONLY, 0440);
-	if (IS_ERR(cal_data_filp)) {
-		set_fs(old_fs);
-		ret = PTR_ERR(cal_data_filp);
-		pr_err("[FACTORY] %s: open fail prox_cal:%d\n", __func__, ret);
-		return ret;
-	}
-
-	ret = vfs_read(cal_data_filp, (char *)threshold,
-		2 * sizeof(uint16_t), &cal_data_filp->f_pos);
-	if (ret < 0) {
-		pr_err("[FACTORY] %s: fd read fail:%d\n", __func__, ret);
-		filp_close(cal_data_filp, current->files);
-		set_fs(old_fs);
-		return ret;
-	}
-
-	filp_close(cal_data_filp, current->files);
-	set_fs(old_fs);
-
-	return ret;
-}
-
-static ssize_t prox_fac_cal_show(struct device *dev,
+static ssize_t prox_cancel_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
-	uint16_t threshold[2] = {0, };
-	int ret = 0;
+	struct adsp_data *data = dev_get_drvdata(dev);
+	int hi_thd, low_thd;
 
-	ret = prox_read_cal_data(threshold);
-	if (ret < 0)
-		pr_err("[FACTORY] %s: prox_read_cal_data() failed(%d)\n", __func__, ret);
+	hi_thd = get_prox_threshold(data, PRX_THRESHOLD_DETECT_H);
+	low_thd = get_prox_threshold(data, PRX_THRESHOLD_RELEASE_L);
 
-	pr_info("[FACTORY] %s: near %u far %u\n", __func__, threshold[0], threshold[1]);
+	if (pdata->avgwork_check == 0) {
+		if (get_prox_sidx(data) == MSG_PROX)
+			get_prox_raw_data(&pdata->val, &pdata->offset);
+#ifdef CONFIG_SUPPORT_DUAL_OPTIC
+		else
+			get_sub_prox_raw_data(&pdata->val, &pdata->offset);
+#endif
+	}
+	pr_info("[FACTORY] %s: offset: %d, hi thd: %d, lo thd: %d\n", __func__,
+		pdata->offset, hi_thd, low_thd);
 
-	return snprintf(buf, PAGE_SIZE, "%d,%d\n", threshold[0], threshold[1]);
+	return snprintf(buf, PAGE_SIZE, "%d,%d,%d\n",
+			pdata->offset, hi_thd, low_thd);
 }
 
-static ssize_t prox_fac_cal_store(struct device *dev,
+static ssize_t prox_cancel_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t size)
 {
 	struct adsp_data *data = dev_get_drvdata(dev);
 	uint16_t prox_idx = get_prox_sidx(data);
 	uint8_t cnt = 0;
-	uint16_t threshold[2] = {0, };
-	int ret = 0;
 
-	if(sysfs_streq(buf, "2")) {
-		mutex_lock(&data->prox_factory_mutex);
-		adsp_unicast(NULL, 0,
-			prox_idx, 0, MSG_TYPE_GET_CAL_DATA);
-
-		while (!(data->ready_flag[MSG_TYPE_GET_CAL_DATA] & 1 << prox_idx) &&
-			cnt++ < TIMEOUT_CNT)
-			msleep(20);
-
-		data->ready_flag[MSG_TYPE_GET_CAL_DATA] &= ~(1 << prox_idx);
-
-		if (cnt >= TIMEOUT_CNT)
-		{
-			pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
-			mutex_unlock(&data->prox_factory_mutex);
-			return ret;
-		}
-
-		mutex_unlock(&data->prox_factory_mutex);
-
-		threshold[0] = (uint16_t)data->msg_buf[MSG_PROX][0];
-		threshold[1] = (uint16_t)data->msg_buf[MSG_PROX][1];
-
-		if(data->msg_buf[MSG_PROX][2] == 0)
-		{
-			pr_err("[FACTORY] %s: no cal\n", __func__);
-			return ret;
-		}
-
-		pr_info("[FACTORY] %s: near %u, far %u\n", __func__, threshold[0], threshold[1]);
-	}
-	else {
+	if (!sysfs_streq(buf, "1")) {
 		pr_err("[FACTORY] %s: wrong value\n", __func__);
 		return size;
 	}
+
+	mutex_lock(&data->prox_factory_mutex);
+	adsp_unicast(NULL, 0,
+		prox_idx, 0, MSG_TYPE_SET_CAL_DATA);
+
+	while (!(data->ready_flag[MSG_TYPE_SET_CAL_DATA] & 1 << prox_idx) &&
+		cnt++ < TIMEOUT_CNT)
+		msleep(20);
+
+	data->ready_flag[MSG_TYPE_SET_CAL_DATA] &= ~(1 << prox_idx);
+
+	if (cnt >= TIMEOUT_CNT)
+		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
+
+	mutex_unlock(&data->prox_factory_mutex);
 
 	pr_info("[FACTORY] %s: done!\n", __func__);
 
 	return size;
 }
-
-#ifdef CONFIG_SUPPORT_PROX_POWER_ON_CAL
-void prox_factory_init_work(void)
-{
-	int32_t msg_buf[1];
-
-#ifdef CONFIG_SEC_FACTORY
-	msg_buf[0] = 1;
-#else
-	msg_buf[0] = 0;
-#endif
-	pr_info("[FACTORY] %s : start %d\n", __func__, msg_buf[0]);
-	adsp_unicast(msg_buf, sizeof(msg_buf),
-		MSG_PROX, 0, MSG_TYPE_OPTION_DEFINE);
-#if 0
-	struct file *cal_filp = NULL;
-	mm_segment_t old_fs;
-	uint16_t threshold[2] = {30, 20};
-	int ret = 0;
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-
-	cal_filp = filp_open(CAL_DATA_FILE_PATH, O_RDONLY, 0440);
-	if (PTR_ERR(cal_filp) == -ENOENT || PTR_ERR(cal_filp) == -ENXIO) {
-		pr_info("[FACTORY] %s : no prox cal file\n", __func__);
-		set_fs(old_fs);
-		prox_write_cal_data(threshold, true);
-	} else if (IS_ERR(cal_filp)) {
-		pr_err("[FACTORY]: %s - filp_open error\n", __func__);
-		set_fs(old_fs);
-		return;
-	} else {
-		pr_info("[FACTORY] %s : already exist\n", __func__);
-		ret = vfs_read(cal_filp, (char *)threshold,
-			2 * sizeof(uint16_t), &cal_filp->f_pos);
-		if (ret < 0) {
-			pr_err("[FACTORY] %s: fd read fail:%d\n", __func__, ret);
-		}
-		filp_close(cal_filp, current->files);
-		set_fs(old_fs);
-	}
-	
-	pr_info("[FACTORY] %s : threshold %u %u\n", __func__, threshold[0], threshold[1]);
-	adsp_unicast(threshold, sizeof(threshold),
-	MSG_PROX, 0, MSG_TYPE_OPTION_DEFINE);
-#endif
-}
-#endif
 
 static ssize_t prox_thresh_high_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
@@ -419,26 +357,33 @@ static ssize_t prox_thresh_low_store(struct device *dev,
 
 	return size;
 }
-#if 0
+
+#ifdef CONFIG_SUPPORT_PROX_AUTO_CAL
 static ssize_t prox_thresh_detect_high_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
-	pr_info("[FACTORY] %s: %d\n", __func__, pdata->high_detect_h);
+	struct adsp_data *data = dev_get_drvdata(dev);
+	int thd;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n",	pdata->high_detect_h);
+	thd = get_prox_threshold(data, PRX_THRESHOLD_HIGH_DETECT_H);
+	pr_info("[FACTORY] %s: %d\n", __func__, thd);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n",	thd);
 }
 
 static ssize_t prox_thresh_detect_high_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t size)
 {
+	struct adsp_data *data = dev_get_drvdata(dev);
 	int thd = 0;
 
 	if (kstrtoint(buf, 10, &thd)) {
 		pr_err("[FACTORY] %s: kstrtoint fail\n", __func__);
 		return size;
 	}
-	pdata->high_detect_h = thd;
-	pr_info("[FACTORY] %s: %d\n", __func__, pdata->high_detect_h);
+
+	set_prox_threshold(data, PRX_THRESHOLD_HIGH_DETECT_H, thd);
+	pr_info("[FACTORY] %s: %d\n", __func__, thd);
 
 	return size;
 }
@@ -446,26 +391,57 @@ static ssize_t prox_thresh_detect_high_store(struct device *dev,
 static ssize_t prox_thresh_detect_low_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
-	pr_info("[FACTORY] %s: %d\n", __func__, pdata->high_detect_l);
+	struct adsp_data *data = dev_get_drvdata(dev);
+	int thd;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n",	pdata->high_detect_l);
+	thd = get_prox_threshold(data, PRX_THRESHOLD_HIGH_DETECT_L);
+	pr_info("[FACTORY] %s: %d\n", __func__, thd);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n",	thd);
 }
 
 static ssize_t prox_thresh_detect_low_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t size)
 {
+	struct adsp_data *data = dev_get_drvdata(dev);
 	int thd = 0;
 
 	if (kstrtoint(buf, 10, &thd)) {
 		pr_err("[FACTORY] %s: kstrtoint fail\n", __func__);
 		return size;
 	}
-	pdata->high_detect_l = thd;
-	pr_info("[FACTORY] %s: %d\n", __func__, pdata->high_detect_l);
+
+	set_prox_threshold(data, PRX_THRESHOLD_HIGH_DETECT_L, thd);
+	pr_info("[FACTORY] %s: %d\n", __func__, thd);
 
 	return size;
 }
 #endif
+
+static ssize_t barcode_emul_enable_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%u\n", pdata->bBarcodeEnabled);
+}
+
+static ssize_t barcode_emul_enable_store(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t size)
+{
+	int iRet;
+	int64_t dEnable;
+
+	iRet = kstrtoll(buf, 10, &dEnable);
+	if (iRet < 0)
+		return iRet;
+
+	if (dEnable)
+		pdata->bBarcodeEnabled = 1;
+	else
+		pdata->bBarcodeEnabled = 0;
+
+	return size;
+}
+
 static ssize_t prox_cancel_pass_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -508,13 +484,12 @@ static ssize_t prox_register_read_show(struct device *dev,
 		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
 
 	pdata->reg_backup[1] = data->msg_buf[prox_idx][0];
-	pr_info("[FACTORY] %s: [0x%x]: 0x%x\n",
+	pr_info("[FACTORY] %s: [0x%x]: %d\n",
 		__func__, pdata->reg_backup[0], pdata->reg_backup[1]);
 
 	mutex_unlock(&data->prox_factory_mutex);
 
-	return snprintf(buf, PAGE_SIZE, "[0x%x]: 0x%x\n",
-		pdata->reg_backup[0], pdata->reg_backup[1]);
+	return snprintf(buf, PAGE_SIZE, "%d\n", pdata->reg_backup[1]);
 }
 
 static ssize_t prox_register_read_store(struct device *dev,
@@ -522,7 +497,7 @@ static ssize_t prox_register_read_store(struct device *dev,
 {
 	int reg = 0;
 
-	if (sscanf(buf, "%3x", &reg) != 1) {
+	if (sscanf(buf, "%3d", &reg) != 1) {
 		pr_err("[FACTORY]: %s - The number of data are wrong\n",
 			__func__);
 		return -EINVAL;
@@ -542,7 +517,7 @@ static ssize_t prox_register_write_store(struct device *dev,
 	int cnt = 0;
 	int32_t msg_buf[2];
 
-	if (sscanf(buf, "%3x,%3x", &msg_buf[0], &msg_buf[1]) != 2) {
+	if (sscanf(buf, "%3d,%5d", &msg_buf[0], &msg_buf[1]) != 2) {
 		pr_err("[FACTORY]: %s - The number of data are wrong\n",
 			__func__);
 		return -EINVAL;
@@ -562,7 +537,7 @@ static ssize_t prox_register_write_store(struct device *dev,
 		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
 
 	pdata->reg_backup[0] = msg_buf[0];
-	pr_info("[FACTORY] %s: 0x%x - 0x%x\n",
+	pr_info("[FACTORY] %s: 0x%x - %d\n",
 		__func__, msg_buf[0], data->msg_buf[prox_idx][0]);
 	mutex_unlock(&data->prox_factory_mutex);
 
@@ -616,6 +591,34 @@ static ssize_t prox_light_get_dhr_sensor_info_show(struct device *dev,
 	return offset;
 }
 
+static ssize_t prox_wakelock_store(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t size)
+{
+	if (!sysfs_streq(buf, "1"))
+		return size;
+
+	wake_lock_timeout(&pdata->prox_wake_lock, 3 * HZ);
+
+	return size;
+}
+
+#ifdef CONFIG_SUPPORT_BHL_COMPENSATION_FOR_LIGHT_SENSOR
+static ssize_t prox_position_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+#if defined(CONFIG_SEC_BEYOND0QLTE_PROJECT)
+	return snprintf(buf, PAGE_SIZE, "47.3 3.0\n");
+#elif defined(CONFIG_SEC_BEYOND1QLTE_PROJECT)
+	return snprintf(buf, PAGE_SIZE, "49.8 2.8\n");
+#elif defined(CONFIG_SEC_BEYOND2QLTE_PROJECT) || defined(CONFIG_SEC_BEYONDXQ_PROJECT)
+	return snprintf(buf, PAGE_SIZE, "48.0 3.0\n");
+#else
+	return snprintf(buf, PAGE_SIZE, "0 0\n");
+#endif
+}
+
+static DEVICE_ATTR(prox_position, 0444, prox_position_show, NULL);
+#endif
 static DEVICE_ATTR(vendor, 0444, prox_vendor_show, NULL);
 static DEVICE_ATTR(name, 0444, prox_name_show, NULL);
 static DEVICE_ATTR(state, 0444, prox_raw_data_show, NULL);
@@ -623,7 +626,7 @@ static DEVICE_ATTR(raw_data, 0444, prox_raw_data_show, NULL);
 static DEVICE_ATTR(prox_avg, 0664,
 	prox_avg_show, prox_avg_store);
 static DEVICE_ATTR(prox_cal, 0664,
-	prox_fac_cal_show, prox_fac_cal_store);
+	prox_cancel_show, prox_cancel_store);
 static DEVICE_ATTR(thresh_high, 0664,
 	prox_thresh_high_show, prox_thresh_high_store);
 static DEVICE_ATTR(thresh_low, 0664,
@@ -632,9 +635,12 @@ static DEVICE_ATTR(register_write, 0220,
 	NULL, prox_register_write_store);
 static DEVICE_ATTR(register_read, 0664,
 	prox_register_read_show, prox_register_read_store);
+static DEVICE_ATTR(barcode_emul_en, 0664,
+	barcode_emul_enable_show, barcode_emul_enable_store);
 static DEVICE_ATTR(prox_offset_pass, 0444, prox_cancel_pass_show, NULL);
 static DEVICE_ATTR(prox_trim, 0444, prox_default_trim_show, NULL);
-#if 0
+
+#ifdef CONFIG_SUPPORT_PROX_AUTO_CAL
 static DEVICE_ATTR(thresh_detect_high, 0664,
 	prox_thresh_detect_high_show, prox_thresh_detect_high_store);
 static DEVICE_ATTR(thresh_detect_low, 0664,
@@ -643,6 +649,7 @@ static DEVICE_ATTR(thresh_detect_low, 0664,
 static DEVICE_ATTR(prox_alert_thresh, 0444, prox_alert_thresh_show, NULL);
 static DEVICE_ATTR(dhr_sensor_info, 0440,
 	prox_light_get_dhr_sensor_info_show, NULL);
+static DEVICE_ATTR(prox_wakelock, 0220, NULL, prox_wakelock_store);
 
 static struct device_attribute *prox_attrs[] = {
 	&dev_attr_vendor,
@@ -653,9 +660,10 @@ static struct device_attribute *prox_attrs[] = {
 	&dev_attr_prox_cal,
 	&dev_attr_thresh_high,
 	&dev_attr_thresh_low,
+	&dev_attr_barcode_emul_en,
 	&dev_attr_prox_offset_pass,
 	&dev_attr_prox_trim,
-#if 0
+#ifdef CONFIG_SUPPORT_PROX_AUTO_CAL
 	&dev_attr_thresh_detect_high,
 	&dev_attr_thresh_detect_low,
 #endif
@@ -663,10 +671,14 @@ static struct device_attribute *prox_attrs[] = {
 	&dev_attr_dhr_sensor_info,
 	&dev_attr_register_write,
 	&dev_attr_register_read,
+	&dev_attr_prox_wakelock,
+#ifdef CONFIG_SUPPORT_BHL_COMPENSATION_FOR_LIGHT_SENSOR
+	&dev_attr_prox_position,
+#endif
 	NULL,
 };
 
-static int __init prox_factory_init(void)
+static int __init tmd490x_prox_factory_init(void)
 {
 	pdata = kzalloc(sizeof(*pdata), GFP_KERNEL);
 	adsp_factory_register(MSG_PROX, prox_attrs);
@@ -675,6 +687,8 @@ static int __init prox_factory_init(void)
 	hrtimer_init(&pdata->prox_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	pdata->prox_timer.function = prox_timer_func;
 	pdata->prox_wq = create_singlethread_workqueue("prox_wq");
+	wake_lock_init(&pdata->prox_wake_lock,
+		WAKE_LOCK_SUSPEND, "prox_wake_lock");
 
 	/* this is the thread function we run on the work queue */
 	INIT_WORK(&pdata->work_prox, prox_work_func);
@@ -685,22 +699,21 @@ static int __init prox_factory_init(void)
 	pdata->min = 0;
 	pdata->max = 0;
 	pdata->offset = 0;
-	pdata->high_detect_h = 30;
-	pdata->high_detect_l = 20;
 	return 0;
 }
 
-static void __exit prox_factory_exit(void)
+static void __exit tmd490x_prox_factory_exit(void)
 {
 	if (pdata->avgtimer_enabled == 1) {
 		hrtimer_cancel(&pdata->prox_timer);
 		cancel_work_sync(&pdata->work_prox);
 	}
 	destroy_workqueue(pdata->prox_wq);
+	wake_lock_destroy(&pdata->prox_wake_lock);
 	adsp_factory_unregister(MSG_PROX);
 	kfree(pdata);
 	pr_info("[FACTORY] %s\n", __func__);
 }
 
-module_init(prox_factory_init);
-module_exit(prox_factory_exit);
+module_init(tmd490x_prox_factory_init);
+module_exit(tmd490x_prox_factory_exit);

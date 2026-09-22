@@ -25,16 +25,12 @@
 #define ACCEL_RAW_DATA_CNT 3
 #define MAX_ACCEL_1G 4096
 
-#define STM_LSM6DSL_INT_CHECK_RUNNING   4
-
 /* Haptic Pattern A vibrate during 7ms.
  * touch, touchkey, operation feedback use this.
  * Do not call motor_workfunc when duration is 7ms.
  */
-#define MAX_MOTOR_STOP_TIMEOUT (500 * NSEC_PER_MSEC)
-#define DURATION_SKIP	10
-#define MOTOR_OFF	0
-#define MOTOR_ON	1
+#define DURATION_SKIP 10
+#define MOTOR_OFF 0
 
 #define ACCEL_FACTORY_CAL_PATH "/efs/FactoryApp/accel_factory_cal"
 
@@ -42,11 +38,7 @@
 struct accel_motor_data {
 	struct workqueue_struct *slpi_motor_wq;
 	struct work_struct work_slpi_motor;
-	struct workqueue_struct *motor_stop_wq;
-	struct work_struct work_motor_stop;
-	struct hrtimer motor_stop_timer;
 	int motor_state;
-	int prev_motor_state;
 };
 
 struct accel_motor_data *pdata_motor;
@@ -58,6 +50,7 @@ struct accel_data {
 	struct adsp_data *dev_data;
 	bool is_complete_cal;
 	bool lpf_onoff;
+	bool st_complete;
 	int32_t raw_data[ACCEL_RAW_DATA_CNT];
 	int32_t avg_data[ACCEL_RAW_DATA_CNT];
 };
@@ -248,6 +241,7 @@ static ssize_t accel_selftest_show(struct device *dev,
 	uint8_t cnt = 0;
 	int retry = 0;
 
+	pdata->st_complete = false;
 RETRY_ACCEL_SELFTEST:
 	adsp_unicast(NULL, 0, MSG_ACCEL, 0, MSG_TYPE_ST_SHOW_DATA);
 
@@ -281,10 +275,13 @@ RETRY_ACCEL_SELFTEST:
 			data->msg_buf[MSG_ACCEL][2] == 0) {
 			retry++;
 			msleep(200);
+			cnt = 0;
 			pr_info("[FACTORY] %s: retry\n", __func__);
 			goto RETRY_ACCEL_SELFTEST;
 		}
 	}
+
+	pdata->st_complete = true;
 
 	return snprintf(buf, PAGE_SIZE, "%d,%d,%d,%d,%d,%d,%d\n",
 			data->msg_buf[MSG_ACCEL][1],
@@ -303,6 +300,12 @@ static ssize_t accel_raw_data_show(struct device *dev,
 	int32_t raw_data[ACCEL_RAW_DATA_CNT] = {0, };
 	static int32_t prev_raw_data[ACCEL_RAW_DATA_CNT];
 	int ret = 0;
+
+	if (pdata->st_complete == false) {
+		pr_info("[FACTORY] %s: selftest is running\n", __func__);
+		return snprintf(buf, PAGE_SIZE, "%d,%d,%d\n",
+			raw_data[0], raw_data[1], raw_data[2]);
+	}
 
 	mutex_lock(&data->accel_factory_mutex);
 	ret = get_accel_raw_data(raw_data);
@@ -330,71 +333,28 @@ static ssize_t accel_reactive_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct adsp_data *data = dev_get_drvdata(dev);
-	uint8_t cnt = 0;
 	bool success = false;
-	int32_t msg_buf = 0;
+	int32_t raw_data[ACCEL_RAW_DATA_CNT] = {0, };
 
 	mutex_lock(&data->accel_factory_mutex);
-	adsp_unicast(&msg_buf, sizeof(int32_t), MSG_ACCEL,
-		0, MSG_TYPE_GET_REGISTER);
-
-	while (!(data->ready_flag[MSG_TYPE_GET_REGISTER] & 1 << MSG_ACCEL) &&
-		cnt++ < TIMEOUT_CNT)
-		usleep_range(500, 550);
-
-	data->ready_flag[MSG_TYPE_GET_REGISTER] &= ~(1 << MSG_ACCEL);
+	get_accel_raw_data(raw_data);
 	mutex_unlock(&data->accel_factory_mutex);
 
-	if (cnt >= TIMEOUT_CNT) {
-		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
-		return snprintf(buf, PAGE_SIZE, "%d\n", (int)success);
-	}
-
-	pr_info("[FACTORY]: %s - %d\n", __func__,
-		data->msg_buf[MSG_ACCEL][0]);
-
-	if (data->msg_buf[MSG_ACCEL][0] == 0)
+	if (raw_data[0] != 0 || raw_data[1] != 0 || raw_data[2] != 0)
 		success = true;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", (int)success);
+	return snprintf(buf, PAGE_SIZE, "%d\n", success);
 }
 
 static ssize_t accel_reactive_store(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t size)
 {
-	struct adsp_data *data = dev_get_drvdata(dev);
-	int32_t msg_buf;
-	uint8_t cnt = 0;
-
 	if (sysfs_streq(buf, "1"))
 		pr_info("[FACTORY]: %s - on\n", __func__);
 	else if (sysfs_streq(buf, "0"))
 		pr_info("[FACTORY]: %s - off\n", __func__);
-	else if (sysfs_streq(buf, "2")) {
+	else if (sysfs_streq(buf, "2"))
 		pr_info("[FACTORY]: %s - factory\n", __func__);
-		msg_buf = 1;
-
-		mutex_lock(&data->accel_factory_mutex);
-		adsp_unicast(&msg_buf, sizeof(int32_t), MSG_ACCEL,
-			0, MSG_TYPE_GET_REGISTER);
-
-		while (!(data->ready_flag[MSG_TYPE_GET_REGISTER] & 1 << MSG_ACCEL) &&
-			cnt++ < TIMEOUT_CNT)
-			usleep_range(500, 550);
-
-		data->ready_flag[MSG_TYPE_GET_REGISTER] &= ~(1 << MSG_ACCEL);
-		mutex_unlock(&data->accel_factory_mutex);
-
-		if (cnt >= TIMEOUT_CNT) {
-			pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
-			return size;
-		}
-
-		if (data->msg_buf[MSG_ACCEL][0] == STM_LSM6DSL_INT_CHECK_RUNNING)
-			pr_info("[FACTORY]: %s - STM_LSM6DSO_INT_CHECK_RUNNING\n", __func__);
-		else
-			pr_info("[FACTORY]: %s - Something wrong\n", __func__);
-	}
 
 	return size;
 }
@@ -432,70 +392,46 @@ static ssize_t accel_lowpassfilter_store(struct device *dev,
 
 	pdata->lpf_onoff = (bool)data->msg_buf[MSG_ACCEL][1];
 
-	pr_info("[FACTORY] %s: %d, 0x0A:%02x 0x0D:%02x 0x10:%02x\n", __func__,
-		data->msg_buf[MSG_ACCEL][0], data->msg_buf[MSG_ACCEL][1],
-		data->msg_buf[MSG_ACCEL][2], data->msg_buf[MSG_ACCEL][3]);
+	pr_info("[FACTORY] %s: done:%d, onoff:%d\n", __func__,
+		data->msg_buf[MSG_ACCEL][0], data->msg_buf[MSG_ACCEL][1]);
 
 	return size;
 }
 
 #ifdef CONFIG_SLPI_MOTOR
-void motor_stop_work_func(struct work_struct *work)
-{
-	int32_t msg_buf = MOTOR_OFF;
-
-	pr_info("[FACTORY] %s\n", __func__);
-	adsp_unicast(&msg_buf, sizeof(int32_t), MSG_ACCEL,
-		0, MSG_TYPE_SET_ACCEL_MOTOR);
-}
-
-static enum hrtimer_restart motor_stop_timer_func(struct hrtimer *timer)
-{
-	pdata_motor->motor_state = MOTOR_OFF;
-	queue_work(pdata_motor->motor_stop_wq, &pdata_motor->work_motor_stop);
-
-	return HRTIMER_NORESTART;
-}
-
 int setSensorCallback(int state, int duration)
 {
-	pr_info("[FACTORY] %s: state = %d, duration = %d\n",
-			__func__, state, duration);
 	if (duration > MOTOR_OFF && duration <= DURATION_SKIP)
 		return 0;
 
-	pdata_motor->motor_state = state;
-	queue_work(pdata_motor->slpi_motor_wq, &pdata_motor->work_slpi_motor);
+	if (pdata_motor->motor_state != state) {
+		pr_info("[FACTORY] %s: state = %d, duration = %d\n",
+			__func__, pdata_motor->motor_state, duration);
+		pdata_motor->motor_state = state;
+		queue_work(pdata_motor->slpi_motor_wq, &pdata_motor->work_slpi_motor);
+	}
 
 	return 0;
 }
 
 void slpi_motor_work_func(struct work_struct *work)
 {
-	pr_info("[FACTORY] %s: curr:%d, prev:%d\n", __func__,
-		pdata_motor->motor_state, pdata_motor->prev_motor_state);
-	if (pdata_motor->motor_state == MOTOR_ON) {
-		if (hrtimer_active(&pdata_motor->motor_stop_timer))
-			hrtimer_cancel(&pdata_motor->motor_stop_timer);
-		if (pdata_motor->prev_motor_state != pdata_motor->motor_state) {
-			int32_t msg_buf = MOTOR_ON;
+#if 0
+	struct msg_data message;
+	int motor = 0;
 
-			adsp_unicast(&msg_buf, sizeof(int32_t), MSG_ACCEL,
-				0, MSG_TYPE_SET_ACCEL_MOTOR);
-		}
-		pr_info("[FACTORY] %s: Motor on\n", __func__);
-	} else if (pdata_motor->motor_state == MOTOR_OFF) {
-		if (hrtimer_active(&pdata_motor->motor_stop_timer))
-			hrtimer_cancel(&pdata_motor->motor_stop_timer);
-		hrtimer_start(&pdata_motor->motor_stop_timer,
-			ns_to_ktime(MAX_MOTOR_STOP_TIMEOUT),
-			HRTIMER_MODE_REL);
-	} else {
-		pr_info("[FACTORY] %s: invalid state %d\n",
-			__func__, pdata_motor->motor_state);
+	if (pdata_motor->motor_state == 1) {
+		motor = MSG_TYPE_ACCEL_MOTOR_ON;
+		message.msg_type = MSG_ACCEL_MOT_ON;
+	} else if (pdata_motor->motor_state == 0) {
+		motor = MSG_TYPE_ACCEL_MOTOR_OFF;
+		message.msg_type = MSG_ACCEL_MOT_OFF;
 	}
 
-	pdata_motor->prev_motor_state = pdata_motor->motor_state;
+	pr_info("[FACTORY] %s: state = %d\n", __func__, pdata_motor->motor_state);
+
+	adsp_unicast(&message, sizeof(message), motor, 0, 0);
+#endif
 }
 #endif
 
@@ -627,31 +563,21 @@ static int __init lsm6dsl_accel_factory_init(void)
 		create_singlethread_workqueue("slpi_motor_wq");
 
 	if (pdata_motor->slpi_motor_wq == NULL) {
-		pr_err("[FACTORY]: %s - couldn't create motor wq\n", __func__);
-		kfree(pdata_motor);
-		return -ENOMEM;
-	}
-
-	pdata_motor->motor_stop_wq =
-		create_singlethread_workqueue("motor_stop_wq");
-
-	if (pdata_motor->motor_stop_wq == NULL) {
-		pr_err("[FACTORY]: %s - couldn't create stop wq\n", __func__);
+		pr_err("[FACTORY]: %s - could not create motor wq\n", __func__);
 		kfree(pdata_motor);
 		return -ENOMEM;
 	}
 
 	INIT_WORK(&pdata_motor->work_slpi_motor, slpi_motor_work_func);
-	INIT_WORK(&pdata_motor->work_motor_stop, motor_stop_work_func);
-	hrtimer_init(&pdata_motor->motor_stop_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	pdata_motor->motor_stop_timer.function = motor_stop_timer_func;
-	pdata_motor->motor_state = pdata_motor->prev_motor_state = -1;
+
+	pdata_motor->motor_state = 0;
 #endif
 	pdata = kzalloc(sizeof(*pdata), GFP_KERNEL);
 	pdata->accel_wq = create_singlethread_workqueue("accel_wq");
 	INIT_WORK(&pdata->work_accel, accel_work_func);
 
 	pdata->lpf_onoff = true;
+	pdata->st_complete = true;
 	pr_info("[FACTORY] %s\n", __func__);
 
 	return 0;
@@ -661,19 +587,10 @@ static void __exit lsm6dsl_accel_factory_exit(void)
 {
 	adsp_factory_unregister(MSG_ACCEL);
 #ifdef CONFIG_SLPI_MOTOR
-	if (hrtimer_active(&pdata_motor->motor_stop_timer))
-		hrtimer_cancel(&pdata_motor->motor_stop_timer);
-	if (pdata_motor != NULL) {
-		if (pdata_motor->slpi_motor_wq != NULL) {
-			cancel_work_sync(&pdata_motor->work_slpi_motor);
-			destroy_workqueue(pdata_motor->slpi_motor_wq);
-			pdata_motor->slpi_motor_wq = NULL;
-		}
-		if (pdata_motor->motor_stop_wq != NULL) {
-			cancel_work_sync(&pdata_motor->work_motor_stop);
-			destroy_workqueue(pdata_motor->motor_stop_wq);
-			pdata_motor->motor_stop_wq = NULL;
-		}
+	if (pdata_motor != NULL && pdata_motor->slpi_motor_wq != NULL) {
+		cancel_work_sync(&pdata_motor->work_slpi_motor);
+		destroy_workqueue(pdata_motor->slpi_motor_wq);
+		pdata_motor->slpi_motor_wq = NULL;
 	}
 #endif
 	pr_info("[FACTORY] %s\n", __func__);

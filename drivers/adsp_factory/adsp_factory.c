@@ -32,19 +32,44 @@ static u8 msg_size[MSG_SENSOR_MAX] = {
 	MSG_PRESSURE_MAX,
 	MSG_LIGHT_MAX,
 	MSG_PROX_MAX,
-	MSG_TYPE_SIZE_ZERO,
-	MSG_TYPE_SIZE_ZERO,
-	MSG_TYPE_SIZE_ZERO,
+	MSG_TYPE_SIZE_ZERO, //MSG_HH_HOLE
+	MSG_MOBEAM_MAX,
+#ifdef CONFIG_SUPPORT_DUAL_6AXIS
+	MSG_ACCEL_MAX,
+	MSG_GYRO_MAX,
+#endif
+#ifdef CONFIG_SUPPORT_DUAL_OPTIC
+	MSG_LIGHT_MAX,
+	MSG_PROX_MAX,
+#endif
+#ifdef CONFIG_SUPPORT_SUB_MOBEAM
+	MSG_MOBEAM_MAX,
+#endif
+	MSG_TYPE_SIZE_ZERO,  /* PHYSICAL_SENSOR_SYSFS */
 	MSG_GYRO_TEMP_MAX,
+#ifdef CONFIG_SUPPORT_DUAL_6AXIS
+	MSG_GYRO_TEMP_MAX,
+#endif
 	MSG_PRESSURE_TEMP_MAX,
+	MSG_TYPE_SIZE_ZERO, //MSG_MAG_CAL
+#ifdef CONFIG_SUPPORT_VIRTUAL_OPTIC
 	MSG_TYPE_SIZE_ZERO,
-	MSG_FLIP_COVER_DETECTOR_MAX,
-	MSG_TYPE_SIZE_ZERO,
-	MSG_TYPE_SIZE_ZERO,
+#endif
+	MSG_TYPE_SIZE_ZERO, //MSG_REG_SNS
+#ifdef CONFIG_SUPPORT_AK0997X
+	MSG_DIGITAL_HALL_MAX,
+	MSG_DIGITAL_HALL_ANGLE_MAX,
+	MSG_DIGITAL_HALL_ANGLE_MAX,
+#endif
+#ifdef CONFIG_SUPPORT_HIDDEN_HOLE_SUB
+	MSG_TYPE_SIZE_ZERO, //MSG_HH_HOLE_SUB
+#endif
+	MSG_TYPE_SIZE_ZERO, //MSG_FACTORY_INIT_CMD
+	MSG_TYPE_SIZE_ZERO, //MSG_SSC_CORE
 };
 
 /* The netlink socket */
-struct adsp_data *adsp_data;
+struct adsp_data *data;
 
 DEFINE_MUTEX(factory_mutex);
 
@@ -58,7 +83,12 @@ int adsp_unicast(void *param, int param_size, u16 sensor_type,
 	int ret = -1;
 	u16 nlmsg_type = (sensor_type << 8) | msg_type;
 
-	adsp_data->ready_flag[msg_type] &= ~(1 << sensor_type);
+	if (data->restrict_mode && msg_type == MSG_TYPE_SET_ACCEL_MOTOR) {
+		pr_err("[FACTORY] %s - restrict_mode\n", __func__);
+		return ret;
+	}
+
+	data->ready_flag[msg_type] &= ~(1 << sensor_type);
 	skb = nlmsg_new(param_size, GFP_KERNEL);
 	if (!skb) {
 		pr_err("[FACTORY] %s - nlmsg_new fail\n", __func__);
@@ -74,12 +104,45 @@ int adsp_unicast(void *param, int param_size, u16 sensor_type,
 	msg = nlmsg_data(nlh);
 	memcpy(msg, param, param_size);
 	NETLINK_CB(skb).dst_group = 0;
-	ret = nlmsg_unicast(adsp_data->adsp_skt, skb, PID);
+	ret = nlmsg_unicast(data->adsp_skt, skb, PID);
 	if (ret != 0)
 		pr_err("[FACTORY] %s - ret = %d\n", __func__, ret);
 
 	return ret;
 }
+
+#ifdef CONFIG_SUPPORT_DEVICE_MODE
+struct adsp_data* adsp_ssc_core_register(unsigned int type,
+	struct device_attribute *attributes[])
+{
+	int ret = 0;
+
+	data->sensor_attr[type] = attributes;
+	ret = sensors_register(&data->sensor_device[type], data,
+		data->sensor_attr[type], "ssc_core");
+
+	data->sysfs_created[type] = true;
+	pr_info("[FACTORY] %s - type:%u ptr:%pK\n",
+		__func__, type, data->sensor_device[type]);
+
+	return data;
+}
+
+struct adsp_data* adsp_ssc_core_unregister(unsigned int type)
+{
+	pr_info("[FACTORY] %s - type:%u ptr:%pK\n",
+		__func__, type, data->sensor_device[type]);
+
+	if (data->sysfs_created[type]) {
+		sensors_unregister(data->sensor_device[type],
+			data->sensor_attr[type]);
+		data->sysfs_created[type] = false;
+	} else {
+		pr_info("[FACTORY] %s: skip type %u\n", __func__, type);
+	}
+	return data;
+}
+#endif
 
 int adsp_factory_register(unsigned int type,
 	struct device_attribute *attributes[])
@@ -94,6 +157,14 @@ int adsp_factory_register(unsigned int type,
 	case MSG_GYRO:
 		dev_name = "gyro_sensor";
 		break;
+#ifdef CONFIG_SUPPORT_DUAL_6AXIS
+	case MSG_ACCEL_SUB:
+		dev_name = "sub_accelerometer_sensor";
+		break;
+	case MSG_GYRO_SUB:
+		dev_name = "sub_gyro_sensor";
+		break;
+#endif
 	case MSG_MAG:
 		dev_name = "magnetic_sensor";
 		break;
@@ -106,9 +177,12 @@ int adsp_factory_register(unsigned int type,
 	case MSG_PROX:
 		dev_name = "proximity_sensor";
 		break;
-#ifdef CONFIG_FLIP_COVER_DETECTOR_FACTORY
-	case MSG_FLIP_COVER_DETECTOR:
-		dev_name = "flip_cover_detector_sensor";
+#ifdef CONFIG_SUPPORT_DUAL_OPTIC
+	case MSG_LIGHT_SUB:
+		dev_name = "sub_light_sensor";
+		break;
+	case MSG_PROX_SUB:
+		dev_name = "sub_proximity_sensor";
 		break;
 #endif
 	case MSG_SSC_CORE:
@@ -117,18 +191,28 @@ int adsp_factory_register(unsigned int type,
 	case MSG_HH_HOLE:
 		dev_name = "hidden_hole";
 		break;
+#ifdef CONFIG_SUPPORT_HIDDEN_HOLE_SUB
+	case MSG_HH_HOLE_SUB:
+		dev_name = "hidden_hole_sub";
+		break;
+#endif
+#ifdef CONFIG_SUPPORT_AK0997X
+	case MSG_DIGITAL_HALL:
+		dev_name = "digital_hall";
+		break;
+#endif
 	default:
 		dev_name = "unknown_sensor";
 		break;
 	}
 
-	adsp_data->sensor_attr[type] = attributes;
-	ret = sensors_register(&adsp_data->sensor_device[type], adsp_data,
-		adsp_data->sensor_attr[type], dev_name);
+	data->sensor_attr[type] = attributes;
+	ret = sensors_register(&data->sensor_device[type], data,
+		data->sensor_attr[type], dev_name);
 
-	adsp_data->sysfs_created[type] = true;
+	data->sysfs_created[type] = true;
 	pr_info("[FACTORY] %s - type:%u ptr:%pK\n",
-		__func__, type, adsp_data->sensor_device[type]);
+		__func__, type, data->sensor_device[type]);
 
 	return ret;
 }
@@ -136,12 +220,12 @@ int adsp_factory_register(unsigned int type,
 int adsp_factory_unregister(unsigned int type)
 {
 	pr_info("[FACTORY] %s - type:%u ptr:%pK\n",
-		__func__, type, adsp_data->sensor_device[type]);
+		__func__, type, data->sensor_device[type]);
 
-	if (adsp_data->sysfs_created[type]) {
-		sensors_unregister(adsp_data->sensor_device[type],
-			adsp_data->sensor_attr[type]);
-		adsp_data->sysfs_created[type] = false;
+	if (data->sysfs_created[type]) {
+		sensors_unregister(data->sensor_device[type],
+			data->sensor_attr[type]);
+		data->sysfs_created[type] = false;
 	} else {
 		pr_info("[FACTORY] %s: skip type %u\n", __func__, type);
 	}
@@ -152,27 +236,55 @@ int get_prox_raw_data(int *raw_data, int *offset)
 {
 	uint8_t cnt = 0;
 
-	mutex_lock(&adsp_data->prox_factory_mutex);
+	mutex_lock(&data->prox_factory_mutex);
 	adsp_unicast(NULL, 0, MSG_PROX, 0, MSG_TYPE_GET_RAW_DATA);
 
-	while (!(adsp_data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_PROX) &&
+	while (!(data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_PROX) &&
 		cnt++ < TIMEOUT_CNT)
 		usleep_range(500, 550);
 
-	adsp_data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_PROX);
+	data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_PROX);
 
 	if (cnt >= TIMEOUT_CNT) {
 		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
-		mutex_unlock(&adsp_data->prox_factory_mutex);
+		mutex_unlock(&data->prox_factory_mutex);
 		return -1;
 	}
 
-	*raw_data = adsp_data->msg_buf[MSG_PROX][0];
-	*offset = adsp_data->msg_buf[MSG_PROX][1];
-	mutex_unlock(&adsp_data->prox_factory_mutex);
+	*raw_data = data->msg_buf[MSG_PROX][0];
+	*offset = data->msg_buf[MSG_PROX][1];
+	mutex_unlock(&data->prox_factory_mutex);
 
 	return 0;
 }
+
+#ifdef CONFIG_SUPPORT_DUAL_OPTIC
+int get_sub_prox_raw_data(int *raw_data, int *offset)
+{
+	uint8_t cnt = 0;
+
+	mutex_lock(&data->prox_factory_mutex);
+	adsp_unicast(NULL, 0, MSG_PROX_SUB, 0, MSG_TYPE_GET_RAW_DATA);
+
+	while (!(data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_PROX_SUB) &&
+		cnt++ < TIMEOUT_CNT)
+		usleep_range(500, 550);
+
+	data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_PROX_SUB);
+
+	if (cnt >= TIMEOUT_CNT) {
+		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
+		mutex_unlock(&data->prox_factory_mutex);
+		return -1;
+	}
+
+	*raw_data = data->msg_buf[MSG_PROX_SUB][0];
+	*offset = data->msg_buf[MSG_PROX_SUB][1];
+	mutex_unlock(&data->prox_factory_mutex);
+
+	return 0;
+}
+#endif
 
 int get_accel_raw_data(int32_t *raw_data)
 {
@@ -180,21 +292,45 @@ int get_accel_raw_data(int32_t *raw_data)
 
 	adsp_unicast(NULL, 0, MSG_ACCEL, 0, MSG_TYPE_GET_RAW_DATA);
 
-	while (!(adsp_data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_ACCEL) &&
+	while (!(data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_ACCEL) &&
 		cnt++ < TIMEOUT_CNT)
 		usleep_range(500, 550);
 
-	adsp_data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_ACCEL);
+	data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_ACCEL);
 
 	if (cnt >= TIMEOUT_CNT) {
 		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
 		return -1;
 	}
 
-	memcpy(raw_data, &adsp_data->msg_buf[MSG_ACCEL][0], sizeof(int32_t) * 3);
+	memcpy(raw_data, &data->msg_buf[MSG_ACCEL][0], sizeof(int32_t) * 3);
 
 	return 0;
 }
+
+#ifdef CONFIG_SUPPORT_DUAL_6AXIS
+int get_sub_accel_raw_data(int32_t *raw_data)
+{
+	uint8_t cnt = 0;
+
+	adsp_unicast(NULL, 0, MSG_ACCEL_SUB, 0, MSG_TYPE_GET_RAW_DATA);
+
+	while (!(data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_ACCEL_SUB) &&
+		cnt++ < TIMEOUT_CNT)
+		usleep_range(500, 550);
+
+	data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_ACCEL_SUB);
+
+	if (cnt >= TIMEOUT_CNT) {
+		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
+		return -1;
+	}
+
+	memcpy(raw_data, &data->msg_buf[MSG_ACCEL_SUB][0], sizeof(int32_t) * 3);
+
+	return 0;
+}
+#endif
 
 #ifdef CONFIG_SEC_FACTORY
 int get_mag_raw_data(int32_t *raw_data)
@@ -203,18 +339,18 @@ int get_mag_raw_data(int32_t *raw_data)
 
 	adsp_unicast(NULL, 0, MSG_MAG, 0, MSG_TYPE_GET_RAW_DATA);
 
-	while (!(adsp_data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_MAG) &&
+	while (!(data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_MAG) &&
 		cnt++ < TIMEOUT_CNT)
 		usleep_range(500, 550);
 
-	adsp_data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_MAG);
+	data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_MAG);
 
 	if (cnt >= TIMEOUT_CNT) {
 		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
 		return -1;
 	}
 
-	memcpy(raw_data, &adsp_data->msg_buf[MSG_MAG][0], sizeof(int32_t) * 3);
+	memcpy(raw_data, &data->msg_buf[MSG_MAG][0], sizeof(int32_t) * 3);
 
 	return 0;
 }
@@ -225,10 +361,10 @@ void adsp_mobeam_register(struct device_attribute *attributes[])
 {
 	int i;
 
-	adsp_data->mobeam_device = sec_device_create(0, adsp_data, "sec_barcode_emul");
+	data->mobeam_device = sec_device_create(0, data, "sec_barcode_emul");
 
 	for (i = 0; attributes[i] != NULL; i++)	{
-		if (device_create_file(adsp_data->mobeam_device, attributes[i]) < 0)
+		if (device_create_file(data->mobeam_device, attributes[i]) < 0)
 			pr_err("%s fail to create %d", __func__, i);
 	}
 }
@@ -238,7 +374,63 @@ void adsp_mobeam_unregister(struct device_attribute *attributes[])
 	int i;
 
 	for (i = 0; attributes[i] != NULL; i++)
-		device_remove_file(adsp_data->mobeam_device, attributes[i]);
+		device_remove_file(data->mobeam_device, attributes[i]);
+}
+#ifdef CONFIG_SUPPORT_SUB_MOBEAM
+void adsp_sub_mobeam_register(struct device_attribute *attributes[])
+{
+	int i;
+
+	data->sub_mobeam_device = sec_device_create(0, data, "sec_sub_barcode_emul");
+
+	for (i = 0; attributes[i] != NULL; i++)	{
+		if (device_create_file(data->sub_mobeam_device, attributes[i]) < 0)
+			pr_err("%s fail to create %d", __func__, i);
+	}
+}
+
+void adsp_sub_mobeam_unregister(struct device_attribute *attributes[])
+{
+	int i;
+
+	for (i = 0; attributes[i] != NULL; i++)
+		device_remove_file(data->sub_mobeam_device, attributes[i]);
+}
+#endif
+#endif
+
+#ifdef CONFIG_SUPPORT_AK0997X
+int get_hall_angle_data(int32_t *raw_data)
+{
+	uint8_t cnt = 0;
+
+	adsp_unicast(NULL, 0, MSG_DIGITAL_HALL_ANGLE, 0, MSG_TYPE_GET_RAW_DATA);
+
+	while (!(data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_DIGITAL_HALL_ANGLE) &&
+		cnt++ < TIMEOUT_CNT)
+		usleep_range(500, 550);
+
+	data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_DIGITAL_HALL_ANGLE);
+
+	if (cnt >= TIMEOUT_CNT) {
+		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
+                return -1;
+	}
+
+	pr_info("[FACTORY] %s - st %d/%d, akm %d/%d, lf %d/%d, hall %d/%d/%d(uT)\n",
+		__func__, data->msg_buf[MSG_DIGITAL_HALL_ANGLE][0],
+		data->msg_buf[MSG_DIGITAL_HALL_ANGLE][1],
+		data->msg_buf[MSG_DIGITAL_HALL_ANGLE][2],
+		data->msg_buf[MSG_DIGITAL_HALL_ANGLE][3],
+		data->msg_buf[MSG_DIGITAL_HALL_ANGLE][4],
+		data->msg_buf[MSG_DIGITAL_HALL_ANGLE][5],
+		data->msg_buf[MSG_DIGITAL_HALL_ANGLE][6],
+		data->msg_buf[MSG_DIGITAL_HALL_ANGLE][7],
+		data->msg_buf[MSG_DIGITAL_HALL_ANGLE][8]);
+
+	*raw_data = data->msg_buf[MSG_DIGITAL_HALL_ANGLE][2];
+
+	return 0;
 }
 #endif
 
@@ -257,36 +449,41 @@ static int process_received_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 
 	if (sensor_type == MSG_FACTORY_INIT_CMD) {
 		accel_factory_init_work();
-#if defined(CONFIG_SUPPORT_HIDDEN_HOLE)
+#ifdef CONFIG_SUPPORT_DUAL_6AXIS
+		sub_accel_factory_init_work();
+#endif
+#ifdef CONFIG_SUPPORT_HIDDEN_HOLE
 		hidden_hole_init_work();
 #endif
-#ifdef CONFIG_GP2AP110S_FACTORY
-		prox_gp2ap110s_init_settings(adsp_data);
+#ifdef CONFIG_SUPPORT_HIDDEN_HOLE_SUB
+		hidden_hole_sub_init_work();
 #endif
-#ifndef CONFIG_SUPPORT_PROX_DUALIZATION
-#ifndef CONFIG_NOT_SUPPORT_PROX_FACTORY
+#ifdef CONFIG_SUPPORT_DEVICE_MODE
+		sns_device_mode_init_work();
+#ifdef CONFIG_SUPPORT_DUAL_OPTIC
+		sns_flip_init_work();
+#endif
+#endif
+#ifdef CONFIG_SUPPORT_BHL_COMPENSATION_FOR_LIGHT_SENSOR
+		light_factory_init_work(data);
+#endif
+#ifdef CONFIG_SUPPORT_PROX_POWER_ON_CAL
 		prox_factory_init_work();
 #endif
+#ifdef CONFIG_SUPPORT_PROX_CALIBRATION
+		prox_cal_init_work(data);
 #endif
-#ifdef CONFIG_SUPPORT_LIGHT_READ_UBID
-		light_ub_read_init_work(adsp_data);
+#ifdef CONFIG_SUPPORT_AK0997X
+		digital_hall_factory_auto_cal_init_work();
 #endif
+		data->init_work_done = true;
 		return 0;
 	}
 
-	memcpy(adsp_data->msg_buf[sensor_type],
+	memcpy(data->msg_buf[sensor_type],
 		(int32_t *)NLMSG_DATA(nlh),
 		nlh->nlmsg_len - (int32_t)sizeof(struct nlmsghdr));
-#ifdef CONFIG_SUPPORT_PROX_DUALIZATION
-#ifndef CONFIG_NOT_SUPPORT_PROX_FACTORY
-	if (sensor_type == MSG_PROX && msg_type == MSG_TYPE_ST_SHOW_DATA)
-	{
-		prox_set_name_vendor(adsp_data->msg_buf[MSG_PROX][0]);
-		prox_factory_init_work();
-	}
-#endif
-#endif
-	adsp_data->ready_flag[msg_type] |= 1 << sensor_type;
+	data->ready_flag[msg_type] |= 1 << sensor_type;
 
 	return 0;
 }
@@ -326,32 +523,35 @@ static int __init factory_adsp_init(void)
 	int i;
 
 	pr_info("[FACTORY] %s\n", __func__);
-	adsp_data = kzalloc(sizeof(*adsp_data), GFP_KERNEL);
+	data = kzalloc(sizeof(*data), GFP_KERNEL);
 
 	for (i = 0; i < MSG_SENSOR_MAX; i++) {
 		if (msg_size[i] > 0)
-		  adsp_data->msg_buf[i] = kzalloc(sizeof(int32_t) * msg_size[i],
+		  data->msg_buf[i] = kzalloc(sizeof(int32_t) * msg_size[i],
 			  GFP_KERNEL);
 	}
 
-	adsp_data->adsp_skt = netlink_kernel_create(&init_net,
+	data->adsp_skt = netlink_kernel_create(&init_net,
 		NETLINK_ADSP_FAC, &netlink_cfg);
 
 	for (i = 0; i < MSG_SENSOR_MAX; i++)
-		adsp_data->sysfs_created[i] = false;
+		data->sysfs_created[i] = false;
 	for (i = 0; i < MSG_TYPE_MAX; i++)
-		adsp_data->ready_flag[i] = 0;
+		data->ready_flag[i] = 0;
 
-	mutex_init(&adsp_data->accel_factory_mutex);
-	mutex_init(&adsp_data->prox_factory_mutex);
-	mutex_init(&adsp_data->light_factory_mutex);
-	mutex_init(&adsp_data->flip_cover_factory_mutex);
-	mutex_init(&adsp_data->remove_sysfs_mutex);
+	data->restrict_mode = false;
+	data->init_work_done = false;
 
-#ifdef CONFIG_SUPPORT_LIGHT_READ_UBID
-	INIT_DELAYED_WORK(&adsp_data->light_work, light_ub_read_work_func);
+	mutex_init(&data->accel_factory_mutex);
+	mutex_init(&data->prox_factory_mutex);
+	mutex_init(&data->light_factory_mutex);
+	mutex_init(&data->remove_sysfs_mutex);
+#ifdef CONFIG_SUPPORT_AK0997X
+	mutex_init(&data->digital_hall_mutex);
 #endif
-
+#ifdef CONFIG_SUPPORT_PROX_CALIBRATION
+	INIT_DELAYED_WORK(&data->prox_cal_work, prox_cal_read_work_func);
+#endif
 	pr_info("[FACTORY] %s: Timer Init\n", __func__);
 	return 0;
 }
@@ -360,18 +560,18 @@ static void __exit factory_adsp_exit(void)
 {
 	int i;
 
-	mutex_destroy(&adsp_data->accel_factory_mutex);
-	mutex_destroy(&adsp_data->prox_factory_mutex);
-	mutex_destroy(&adsp_data->light_factory_mutex);
-	mutex_destroy(&adsp_data->flip_cover_factory_mutex);
-	mutex_destroy(&adsp_data->remove_sysfs_mutex);
-
-#ifdef CONFIG_SUPPORT_LIGHT_READ_UBID
-	cancel_delayed_work_sync(&adsp_data->light_work);
+	mutex_destroy(&data->accel_factory_mutex);
+	mutex_destroy(&data->prox_factory_mutex);
+	mutex_destroy(&data->light_factory_mutex);
+	mutex_destroy(&data->remove_sysfs_mutex);
+#ifdef CONFIG_SUPPORT_AK0997X
+	mutex_destroy(&data->digital_hall_mutex);
 #endif
-
+#ifdef CONFIG_SUPPORT_PROX_CALIBRATION
+	cancel_delayed_work_sync(&data->prox_cal_work);
+#endif
 	for (i = 0; i < MSG_SENSOR_MAX; i++)
-		kfree(adsp_data->msg_buf[i]);
+		kfree(data->msg_buf[i]);
 	pr_info("[FACTORY] %s\n", __func__);
 }
 

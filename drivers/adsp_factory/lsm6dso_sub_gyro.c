@@ -16,21 +16,20 @@
 #include <linux/module.h>
 #include "adsp.h"
 #define VENDOR "STM"
-#define CHIP_ID "LSM6DSO"
+#define CHIP_ID "LSM6DSOW"
 #define ST_PASS 1
 #define ST_FAIL 0
 #define STARTUP_BIT_FAIL 2
-#define OIS_ST_BIT_SET 3
 #define G_ZRL_DELTA_FAIL 4
 #define SELFTEST_REVISED 1
 
-static ssize_t gyro_vendor_show(struct device *dev,
+static ssize_t sub_gyro_vendor_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	return snprintf(buf, PAGE_SIZE, "%s\n", VENDOR);
 }
 
-static ssize_t gyro_name_show(struct device *dev,
+static ssize_t sub_gyro_name_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	return snprintf(buf, PAGE_SIZE, "%s\n", CHIP_ID);
@@ -58,33 +57,33 @@ static ssize_t gyro_power_on(struct device *dev,
 	return snprintf(buf, PAGE_SIZE, "%d\n", 1);
 }
 
-static ssize_t gyro_temp_show(struct device *dev,
+static ssize_t sub_gyro_temp_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct adsp_data *data = dev_get_drvdata(dev);
 	uint8_t cnt = 0;
 
-	adsp_unicast(NULL, 0, MSG_GYRO_TEMP, 0, MSG_TYPE_GET_RAW_DATA);
+	adsp_unicast(NULL, 0, MSG_GYRO_SUB_TEMP, 0, MSG_TYPE_GET_RAW_DATA);
 
-	while (!(data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_GYRO_TEMP)
+	while (!(data->ready_flag[MSG_TYPE_GET_RAW_DATA] & 1 << MSG_GYRO_SUB_TEMP)
 		&& cnt++ < TIMEOUT_CNT)
 		msleep(20);
 
-	data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_GYRO_TEMP);
+	data->ready_flag[MSG_TYPE_GET_RAW_DATA] &= ~(1 << MSG_GYRO_SUB_TEMP);
 
 	if (cnt >= TIMEOUT_CNT) {
 		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
 		return snprintf(buf, PAGE_SIZE, "-99\n");
 	}
 
-	pr_info("[FACTORY] %s: gyro_temp = %d\n", __func__,
-		data->msg_buf[MSG_GYRO_TEMP][0]);
+	pr_info("[FACTORY] %s: sub_gyro_temp = %d\n", __func__,
+		data->msg_buf[MSG_GYRO_SUB_TEMP][0]);
 
 	return snprintf(buf, PAGE_SIZE, "%d\n",
-		data->msg_buf[MSG_GYRO_TEMP][0]);
+		data->msg_buf[MSG_GYRO_SUB_TEMP][0]);
 }
 
-static ssize_t gyro_selftest_show(struct device *dev,
+static ssize_t sub_gyro_selftest_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct adsp_data *data = dev_get_drvdata(dev);
@@ -93,13 +92,13 @@ static ssize_t gyro_selftest_show(struct device *dev,
 	int st_zro_res = ST_FAIL;
 
 	pr_info("[FACTORY] %s - start", __func__);
-	adsp_unicast(NULL, 0, MSG_GYRO, 0, MSG_TYPE_ST_SHOW_DATA);
+	adsp_unicast(NULL, 0, MSG_GYRO_SUB, 0, MSG_TYPE_ST_SHOW_DATA);
 
-	while (!(data->ready_flag[MSG_TYPE_ST_SHOW_DATA] & 1 << MSG_GYRO) &&
+	while (!(data->ready_flag[MSG_TYPE_ST_SHOW_DATA] & 1 << MSG_GYRO_SUB) &&
 		cnt++ < TIMEOUT_CNT)
 		msleep(25);
 
-	data->ready_flag[MSG_TYPE_ST_SHOW_DATA] &= ~(1 << MSG_GYRO);
+	data->ready_flag[MSG_TYPE_ST_SHOW_DATA] &= ~(1 << MSG_GYRO_SUB);
 
 	if (cnt >= TIMEOUT_CNT) {
 		pr_err("[FACTORY] %s: Timeout!!!\n", __func__);
@@ -108,61 +107,59 @@ static ssize_t gyro_selftest_show(struct device *dev,
 			ST_FAIL, ST_FAIL);
 	}
 
-	if (data->msg_buf[MSG_GYRO][1] != 0) {
+	if (data->msg_buf[MSG_GYRO_SUB][1] != 0) {
 		pr_info("[FACTORY] %s - failed(%d, %d)\n", __func__,
-			data->msg_buf[MSG_GYRO][1],
-			data->msg_buf[MSG_GYRO][5]);
+			data->msg_buf[MSG_GYRO_SUB][1],
+			data->msg_buf[MSG_GYRO_SUB][5]);
 
 		pr_info("[FACTORY]: %s - %d,%d,%d\n", __func__,
-			data->msg_buf[MSG_GYRO][2],
-			data->msg_buf[MSG_GYRO][3],
-			data->msg_buf[MSG_GYRO][4]);
+			data->msg_buf[MSG_GYRO_SUB][2],
+			data->msg_buf[MSG_GYRO_SUB][3],
+			data->msg_buf[MSG_GYRO_SUB][4]);
 
-		if (data->msg_buf[MSG_GYRO][5] == OIS_ST_BIT_SET)
-			pr_info("[FACTORY] %s - OIS_ST_BIT fail\n", __func__);
-		else if (data->msg_buf[MSG_GYRO][5] == G_ZRL_DELTA_FAIL)
+
+		if (data->msg_buf[MSG_GYRO][5] == G_ZRL_DELTA_FAIL)
 			pr_info("[FACTORY] %s - ZRL Delta fail\n", __func__);
-
 		return snprintf(buf, PAGE_SIZE, "%d,%d,%d\n",
-			data->msg_buf[MSG_GYRO][2],
-			data->msg_buf[MSG_GYRO][3],
-			data->msg_buf[MSG_GYRO][4]);
+			data->msg_buf[MSG_GYRO_SUB][2],
+			data->msg_buf[MSG_GYRO_SUB][3],
+			data->msg_buf[MSG_GYRO_SUB][4]);
 	} else {
 		st_zro_res = ST_PASS;
 	}
 
-	if (!data->msg_buf[MSG_GYRO][5])
+	if (!data->msg_buf[MSG_GYRO_SUB][5])
 		st_diff_res = ST_PASS;
-	else if (data->msg_buf[MSG_GYRO][5] == STARTUP_BIT_FAIL)
+	else if (data->msg_buf[MSG_GYRO_SUB][5] == STARTUP_BIT_FAIL)
 		pr_info("[FACTORY] %s - Gyro Start Up Bit fail\n", __func__);
 
-	pr_info("[FACTORY] %s - %d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+	pr_info("[FACTORY]: %s - %d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 		__func__,
-		data->msg_buf[MSG_GYRO][2], data->msg_buf[MSG_GYRO][3],
-		data->msg_buf[MSG_GYRO][4], data->msg_buf[MSG_GYRO][6],
-		data->msg_buf[MSG_GYRO][7], data->msg_buf[MSG_GYRO][8],
-		data->msg_buf[MSG_GYRO][9], data->msg_buf[MSG_GYRO][10],
-		data->msg_buf[MSG_GYRO][11], data->msg_buf[MSG_GYRO][12],
-		data->msg_buf[MSG_GYRO][13], data->msg_buf[MSG_GYRO][14],
+		data->msg_buf[MSG_GYRO_SUB][2], data->msg_buf[MSG_GYRO_SUB][3],
+		data->msg_buf[MSG_GYRO_SUB][4], data->msg_buf[MSG_GYRO_SUB][6],
+		data->msg_buf[MSG_GYRO_SUB][7], data->msg_buf[MSG_GYRO_SUB][8],
+		data->msg_buf[MSG_GYRO_SUB][9], data->msg_buf[MSG_GYRO_SUB][10],
+		data->msg_buf[MSG_GYRO_SUB][11], data->msg_buf[MSG_GYRO_SUB][12],
+		data->msg_buf[MSG_GYRO_SUB][13], data->msg_buf[MSG_GYRO_SUB][14],
 		st_diff_res, st_zro_res);
 
 	return snprintf(buf, PAGE_SIZE,
 		"%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-		data->msg_buf[MSG_GYRO][2], data->msg_buf[MSG_GYRO][3],
-		data->msg_buf[MSG_GYRO][4], data->msg_buf[MSG_GYRO][6],
-		data->msg_buf[MSG_GYRO][7], data->msg_buf[MSG_GYRO][8],
-		data->msg_buf[MSG_GYRO][9], data->msg_buf[MSG_GYRO][10],
-		data->msg_buf[MSG_GYRO][11], data->msg_buf[MSG_GYRO][12],
-		data->msg_buf[MSG_GYRO][13], data->msg_buf[MSG_GYRO][14],
+		data->msg_buf[MSG_GYRO_SUB][2], data->msg_buf[MSG_GYRO_SUB][3],
+		data->msg_buf[MSG_GYRO_SUB][4], data->msg_buf[MSG_GYRO_SUB][6],
+		data->msg_buf[MSG_GYRO_SUB][7], data->msg_buf[MSG_GYRO_SUB][8],
+		data->msg_buf[MSG_GYRO_SUB][9], data->msg_buf[MSG_GYRO_SUB][10],
+		data->msg_buf[MSG_GYRO_SUB][11], data->msg_buf[MSG_GYRO_SUB][12],
+		data->msg_buf[MSG_GYRO_SUB][13], data->msg_buf[MSG_GYRO_SUB][14],
 		st_diff_res, st_zro_res);
 }
 
-static DEVICE_ATTR(name, 0444, gyro_name_show, NULL);
-static DEVICE_ATTR(vendor, 0444, gyro_vendor_show, NULL);
-static DEVICE_ATTR(selftest, 0440, gyro_selftest_show, NULL);
+static DEVICE_ATTR(name, 0444, sub_gyro_name_show, NULL);
+static DEVICE_ATTR(vendor, 0444, sub_gyro_vendor_show, NULL);
+static DEVICE_ATTR(selftest, 0440, sub_gyro_selftest_show, NULL);
 static DEVICE_ATTR(power_on, 0444, gyro_power_on, NULL);
 static DEVICE_ATTR(power_off, 0444, gyro_power_off, NULL);
-static DEVICE_ATTR(temperature, 0440, gyro_temp_show, NULL);
+static DEVICE_ATTR(temperature, 0440, sub_gyro_temp_show, NULL);
 static DEVICE_ATTR(selftest_revised, 0440, selftest_revised_show, NULL);
 
 static struct device_attribute *gyro_attrs[] = {
@@ -176,21 +173,21 @@ static struct device_attribute *gyro_attrs[] = {
 	NULL,
 };
 
-static int __init lsm6dso_gyro_factory_init(void)
+static int __init lsm6dso_sub_gyro_factory_init(void)
 {
-	adsp_factory_register(MSG_GYRO, gyro_attrs);
+	adsp_factory_register(MSG_GYRO_SUB, gyro_attrs);
 
 	pr_info("[FACTORY] %s\n", __func__);
 
 	return 0;
 }
 
-static void __exit lsm6dso_gyro_factory_exit(void)
+static void __exit lsm6dso_sub_gyro_factory_exit(void)
 {
-	adsp_factory_unregister(MSG_GYRO);
+	adsp_factory_unregister(MSG_GYRO_SUB);
 
 	pr_info("[FACTORY] %s\n", __func__);
 }
 
-module_init(lsm6dso_gyro_factory_init);
-module_exit(lsm6dso_gyro_factory_exit);
+module_init(lsm6dso_sub_gyro_factory_init);
+module_exit(lsm6dso_sub_gyro_factory_exit);
