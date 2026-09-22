@@ -192,6 +192,7 @@ static void pca9468_test_read(struct pca9468_charger *pca9468)
 		pca9468_read_reg(pca9468, address, &val);
 		sprintf(str + strlen(str), "[0x%02x]0x%02x, ", address, val);
 	}
+
 	if (pca9468->pdata->chgen_gpio >= 0)
 		pr_info("## pca9468 : [DC_CPEN:%d]%s\n", gpio_get_value(pca9468->pdata->chgen_gpio), str);
 }
@@ -247,6 +248,7 @@ static void pca9468_set_wdt_timer(struct pca9468_charger *pca9468, int time)
 	pr_info("%s: set wdt time = %d\n", __func__, time);
 }
 
+#if defined(CONFIG_ENG_BATTERY_CONCEPT)
 static void pca9468_check_wdt_control(struct pca9468_charger *pca9468)
 {
 	struct device *dev = pca9468->dev;
@@ -283,6 +285,7 @@ static void pca9468_wdt_control_work(struct work_struct *work)
 	pr_info("## %s: disable slave addr (vin:%dmV, iin:%dmA)\n",
 		__func__, vin/PCA9468_SEC_DENOM_U_M, iin/PCA9468_SEC_DENOM_U_M);
 }
+#endif
 
 static void pca9468_set_done(struct pca9468_charger *pca9468, bool enable)
 {
@@ -2952,7 +2955,11 @@ static int pca9468_start_direct_charging(struct pca9468_charger *pca9468)
 #if defined(CONFIG_BATTERY_SAMSUNG)
 	/* Set watchdog timer enable */
 	pca9468_set_wdt_enable(pca9468, WDT_ENABLE);
+#if defined(CONFIG_ENG_BATTERY_CONCEPT)
 	pca9468_check_wdt_control(pca9468);
+#else
+	pca9468_set_wdt_timer(pca9468, WDT_8SEC);
+#endif
 #endif
 
 	/* Set Switching Frequency */
@@ -3582,18 +3589,19 @@ static int pca9468_irq_init(struct pca9468_charger *pca9468,
 
 	pr_info("%s: =========START=========\n", __func__);
 
-	irq = gpio_to_irq(pdata->irq_gpio);
+	if (pdata->irq_gpio >= 0) {
+		irq = gpio_to_irq(pdata->irq_gpio);
 
-	ret = gpio_request_one(pdata->irq_gpio, GPIOF_IN, client->name);
-	if (ret < 0)
-		goto fail;
+		ret = gpio_request_one(pdata->irq_gpio, GPIOF_IN, client->name);
+		if (ret < 0)
+			goto fail;
 
-	ret = request_threaded_irq(irq, NULL, pca9468_interrupt_handler,
-				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
-				   client->name, pca9468);
-	if (ret < 0)
-		goto fail_gpio;
-
+		ret = request_threaded_irq(irq, NULL, pca9468_interrupt_handler,
+					   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+					   client->name, pca9468);
+		if (ret < 0)
+			goto fail_gpio;
+	}
 	/*
 	 * Configure the Mask Register for interrupts: disable all interrupts by default.
 	 */
@@ -3615,7 +3623,8 @@ static int pca9468_irq_init(struct pca9468_charger *pca9468,
 fail_wirte:
 	free_irq(irq, pca9468);
 fail_gpio:
-	gpio_free(pdata->irq_gpio);
+	if (pdata->irq_gpio >= 0)
+		gpio_free(pdata->irq_gpio);
 fail:
 	client->irq = 0;
 	return ret;
@@ -3875,7 +3884,7 @@ static int pca9468_chg_set_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_MAX ... POWER_SUPPLY_EXT_PROP_MAX:
 		switch (ext_psp) {
-#if defined(CONFIG_BATTERY_SAMSUNG)
+#if defined(CONFIG_BATTERY_SAMSUNG) && defined(CONFIG_ENG_BATTERY_CONCEPT)
 		case POWER_SUPPLY_EXT_PROP_DIRECT_WDT_CONTROL:
 			if (val->intval) {
 				pca9468->wdt_kick = true;
@@ -4069,6 +4078,9 @@ static int pca9468_chg_get_property(struct power_supply *psy,
 					val->intval = ret;
 			}
 			break;
+		case POWER_SUPPLY_EXT_PROP_DIRECT_VOLTAGE_MAX:
+			val->intval = pca9468->float_voltage;
+			break;
 		default:
 			return -EINVAL;
 		}
@@ -4117,7 +4129,12 @@ static int pca9468_charger_parse_dt(struct device *dev, struct pca9468_platform_
 
 	/* irq gpio */
 	pdata->irq_gpio = of_get_named_gpio(np_pca9468, "pca9468,irq-gpio", 0);
-	pr_info("%s: irq-gpio: %u \n", __func__, pdata->irq_gpio);
+	if (pdata->irq_gpio < 0) {
+		pr_err("%s : cannot get irq-gpio : %d\n",
+			__func__, pdata->irq_gpio);
+	} else {
+		pr_info("%s: irq-gpio: %u\n", __func__, pdata->irq_gpio);
+	}
 
 	/* input current limit */
 	ret = of_property_read_u32(np_pca9468, "pca9468,input-current-limit",
@@ -4394,7 +4411,7 @@ static int pca9468_charger_probe(struct i2c_client *client,
 	mutex_unlock(&pca9468_chg->lock);
 
 	INIT_DELAYED_WORK(&pca9468_chg->pps_work, pca9468_pps_request_work);
-#if defined(CONFIG_BATTERY_SAMSUNG)
+#if defined(CONFIG_BATTERY_SAMSUNG) && defined(CONFIG_ENG_BATTERY_CONCEPT)
 	INIT_DELAYED_WORK(&pca9468_chg->wdt_control_work, pca9468_wdt_control_work);
 #endif
 
@@ -4456,15 +4473,13 @@ static int pca9468_charger_probe(struct i2c_client *client,
 	}
 
 #if defined(CONFIG_BATTERY_SAMSUNG)
-	if(pdata->chgen_gpio >= 0) {
+	if (pdata->chgen_gpio >= 0) {
 		ret = gpio_request(pdata->chgen_gpio, "DC_CPEN");
 		if (ret) {
 			pr_info("%s : Request GPIO %d failed\n",
 					__func__, (int)pdata->chgen_gpio);
 		}
-
-		gpio_direction_output(pdata->chgen_gpio,
-				false);
+		gpio_direction_output(pdata->chgen_gpio, false);
 	}
 #endif
 
@@ -4496,7 +4511,8 @@ static int pca9468_charger_remove(struct i2c_client *client)
 
 	if (client->irq) {
 		free_irq(client->irq, pca9468_chg);
-		gpio_free(pca9468_chg->pdata->irq_gpio);
+		if (pca9468_chg->pdata->irq_gpio >= 0)
+			gpio_free(pca9468_chg->pdata->irq_gpio);
 	}
 
 	wakeup_source_trash(&pca9468_chg->monitor_wake_lock);

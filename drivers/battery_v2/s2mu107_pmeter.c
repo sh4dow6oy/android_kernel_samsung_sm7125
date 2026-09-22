@@ -25,7 +25,7 @@
 
 #define VOLTAGE_9V		8000
 #define VOLTAGE_6V		6000
-#define VOLTAGE_5P5V	5500
+#define VOLTAGE_5P5V		5500
 #define VOLTAGE_5V		6000
 
 #define ENABLE		1
@@ -58,14 +58,13 @@ static int s2mu107_pm_enable(struct s2mu107_pmeter_data *pmeter,
 	u8 addr2 = S2MU107_PM_EN_CO2;
 	u8 data1, data2;
 	int i = 0;
-	
+
 	s2mu107_write_reg(pmeter->i2c, S2MU107_PM_CO_MASK1, 0x00);
 	s2mu107_update_reg(pmeter->i2c, S2MU107_PM_CO_MASK2, 0x00, 0xF0);
 
 	s2mu107_read_reg(pmeter->i2c, S2MU107_PM_CO_MASK1, &data1);
 	s2mu107_read_reg(pmeter->i2c, S2MU107_PM_CO_MASK2, &data2);
 	pr_info("%s PM 0x56:0x%02x, 0x57:0x%02x\n", __func__, data1, data2);
-
 
 	/* Default PM mode = continuous */
 	if (mode == REQUEST_RESPONSE_MODE) {
@@ -117,6 +116,7 @@ static int s2mu107_pm_check_value(struct s2mu107_pmeter_data *pmeter, u8 addr1, 
 	int val1, val2, i;
 	u8 data1, data2, data3, data4;
 
+	mutex_lock(&pmeter->pmeter_mutex);
 	for (i = 0; i < 10; i++) {
 		s2mu107_read_reg(pmeter->i2c, addr1, &data1);
 		s2mu107_read_reg(pmeter->i2c, addr2, &data2);
@@ -125,7 +125,7 @@ static int s2mu107_pm_check_value(struct s2mu107_pmeter_data *pmeter, u8 addr1, 
 		s2mu107_read_reg(pmeter->i2c, addr2, &data4);
 
 		if (data1 < 0 || data2 < 0 || data3 < 0 || data4 < 0)
-			return -EINVAL;
+			goto pm_check_unlock;
 
 		val1 = (data1 << 8) | data2;
 		val2 = (data3 << 8) | data4;
@@ -137,10 +137,14 @@ static int s2mu107_pm_check_value(struct s2mu107_pmeter_data *pmeter, u8 addr1, 
 	pr_debug("[%s] 0x%02x : 0x%02x, 0x%02x : 0x%02x (count:%d)",
 				__func__, addr1, data1, addr2, data2, i);
 
-	if (i < 10)
+	if (i < 10) {
+		mutex_unlock(&pmeter->pmeter_mutex);
 		return val1;
-	else
-		return -1;
+	}
+
+pm_check_unlock:
+	mutex_unlock(&pmeter->pmeter_mutex);
+	return -EINVAL;
 }
 
 static int s2mu107_pm_get_vchgin(struct s2mu107_pmeter_data *pmeter)
@@ -189,7 +193,6 @@ static int s2mu107_pm_get_vbyp(struct s2mu107_pmeter_data *pmeter)
 	charge_voltage = charge_voltage * 488 / 1000;
 	
 	pr_debug("%s, voltage = %d\n", __func__, charge_voltage);
-	
 	return charge_voltage;
 }
 
@@ -226,11 +229,11 @@ static int s2mu107_pm_get_vbat(struct s2mu107_pmeter_data *pmeter)
 	pr_debug("%s, voltage = %d\n", __func__, charge_voltage);
 	return charge_voltage;
 }
+
 static int s2mu107_pm_get_tdie(struct s2mu107_pmeter_data *pmeter)
 {
 	u8 data1, data2;
 	int tdie = 0;
-	
 	s2mu107_read_reg(pmeter->i2c, S2MU107_PM_VAL1_TDIE, &data1);
 	s2mu107_read_reg(pmeter->i2c, S2MU107_PM_VAL2_TDIE, &data2);
 
@@ -260,7 +263,6 @@ static int s2mu107_pm_get_vcc1(struct s2mu107_pmeter_data *pmeter)
 	charge_voltage = charge_voltage * 488 / 1000;
 
 	pr_debug("%s, voltage = %d\n", __func__, charge_voltage);
-	
 	return charge_voltage;
 }
 
@@ -278,7 +280,6 @@ static int s2mu107_pm_get_vcc2(struct s2mu107_pmeter_data *pmeter)
 	charge_voltage = charge_voltage * 488 / 1000;
 
 	pr_debug("%s, voltage = %d\n", __func__, charge_voltage);
-
 	return charge_voltage;
 }
 
@@ -296,7 +297,6 @@ static int s2mu107_pm_get_ichgin(struct s2mu107_pmeter_data *pmeter)
 	charge_current = charge_current * 488 / 1000;
 
 	pr_debug("%s, current = %d\n", __func__, charge_current);
-	
 	return charge_current;
 }
 
@@ -310,11 +310,10 @@ static int s2mu107_pm_get_iwcin(struct s2mu107_pmeter_data *pmeter)
 		 pr_info("%s, read fail!\n", __func__);
 		 return -EINVAL;
 	}
- 
+
 	charge_current = charge_current * 488 / 1000;
 
 	pr_debug("%s, current = %d\n", __func__, charge_current);
-	
 	return charge_current;
 }
 
@@ -332,7 +331,6 @@ static int s2mu107_pm_get_iotg(struct s2mu107_pmeter_data *pmeter)
 	charge_current = charge_current * 488 / 1000;
 
 	pr_debug("%s, current = %d\n", __func__, charge_current);
-	
 	return charge_current;
 }
 
@@ -341,7 +339,7 @@ static int s2mu107_pm_get_itx(struct s2mu107_pmeter_data *pmeter)
 	int charge_current = 0;
 	charge_current = s2mu107_pm_check_value(pmeter,
 				S2MU107_PM_VAL1_ITX, S2MU107_PM_VAL2_ITX);
- 
+
 	if (charge_current < 0) {
 		 pr_info("%s, read fail!\n", __func__);
 		 return -EINVAL;
@@ -350,7 +348,6 @@ static int s2mu107_pm_get_itx(struct s2mu107_pmeter_data *pmeter)
 	charge_current = charge_current * 488 / 1000;
 
 	pr_debug("%s, current = %d\n", __func__, charge_current);
-	
 	return charge_current;
 }
 
@@ -368,7 +365,6 @@ static int s2mu107_pm_get_gpadc(struct s2mu107_pmeter_data *pmeter)
 	adc_volt = adc_volt * 488 / 1000;
 
 	pr_debug("%s, adc_volt = %d\n", __func__, adc_volt);
-	
 	return adc_volt;
 }
 
@@ -483,21 +479,49 @@ static void s2mu107_pmeter_trim_update(struct s2mu107_pmeter_data *pmeter, int o
 			__func__, pmeter->is_9v_trim, pmeter->trim_updated);
 }
 
+static void s2mu107_chgin_isr_work(struct work_struct *work)
+{
+	struct s2mu107_pmeter_data *pmeter = container_of(work,
+			struct s2mu107_pmeter_data,
+			vchgin_work.work);
+	int voltage, ichgin;
+	union power_supply_propval value;
+
+	voltage = s2mu107_pm_get_vchgin(pmeter);
+
+	value.intval = voltage;
+	ichgin = s2mu107_pm_get_ichgin(pmeter);
+	pr_info("%s ichgin(%d)\n", __func__, ichgin);
+
+	if (ichgin < 500) {
+		psy_do_property("s2mu107-switching-charger", set,
+			POWER_SUPPLY_EXT_PROP_VCHGIN_CHANGE, value);
+	}
+}
+
+static irqreturn_t s2mu107_ichgin_isr(int irq, void *data)
+{
+	struct s2mu107_pmeter_data *pmeter = data;
+	u8 ichgin_stat;
+
+	s2mu107_read_reg(pmeter->i2c, S2MU107_PM_ICHGIN_STAT, &ichgin_stat);
+	if ((ichgin_stat & 0x80) == 0x80)
+		return IRQ_HANDLED;
+
+	cancel_delayed_work(&pmeter->vchgin_work);
+	schedule_delayed_work(&pmeter->vchgin_work, msecs_to_jiffies(100));
+
+	return IRQ_HANDLED;
+}
+
 static irqreturn_t s2mu107_vchgin_isr(int irq, void *data)
 {
 	struct s2mu107_pmeter_data *pmeter = data;
-	int voltage, ichgin;
+	int voltage;
 	union power_supply_propval value;
 	bool is_sc_charging;
 
 	voltage = s2mu107_pm_get_vchgin(pmeter);
-	value.intval = voltage;
-	ichgin = s2mu107_pm_get_ichgin(pmeter);
-
-	if ((ichgin < 125) && ((voltage > 4200) && (voltage < 4650))) {
-		psy_do_property("s2mu107-switching-charger", set,
-			POWER_SUPPLY_EXT_PROP_VCHGIN_CHANGE, value);
-	}
 
 	if (((voltage >= 8000) && (voltage <= 10300)) ||
 			((voltage >= 4000) && (voltage <= 6000))) {
@@ -524,7 +548,7 @@ static irqreturn_t s2mu107_vchgin_isr(int irq, void *data)
 		pmeter->max_duty_wa = true;
 		value.intval = 1;
 		psy_do_property("s2mu107-switching-charger", set,
-			POWER_SUPPLY_EXT_PROP_MAX_DUTY_EVENT, value);
+				POWER_SUPPLY_EXT_PROP_MAX_DUTY_EVENT, value);
 	} else if (voltage <= VOLTAGE_5P5V && pmeter->max_duty_wa == true) {
 		/* 250mV HYS LEVEL changes */
 		s2mu107_update_reg(pmeter->i2c, S2MU107_PM_HYST_LEVEL1,
@@ -533,8 +557,17 @@ static irqreturn_t s2mu107_vchgin_isr(int irq, void *data)
 		pmeter->max_duty_wa = false;
 		value.intval = 0;
 		psy_do_property("s2mu107-switching-charger", set,
-			POWER_SUPPLY_EXT_PROP_MAX_DUTY_EVENT, value);
+				POWER_SUPPLY_EXT_PROP_MAX_DUTY_EVENT, value);
 	}
+
+	/* bypass mode disable */
+	if (voltage <= 3150)
+	psy_do_property("s2mu107-switching-charger", set,
+		POWER_SUPPLY_EXT_PROP_BYPASS_MODE_DISABLE, value);
+
+	cancel_delayed_work(&pmeter->vchgin_work);
+	schedule_delayed_work(&pmeter->vchgin_work, msecs_to_jiffies(100));
+
 	return IRQ_HANDLED;
 }
 
@@ -553,6 +586,12 @@ static void s2mu107_powermeter_initial(struct s2mu107_pmeter_data *pmeter)
 	s2mu107_update_reg(pmeter->i2c, S2MU107_PM_HYST_LEVEL1,
 			4 << HYST_LEV_VCHGIN_SHIFT,
 			HYST_LEV_VCHGIN_MASK);
+
+	/* ichgin isr option values */
+	s2mu107_write_reg(pmeter->i2c, 0x9B, 0x01);
+	s2mu107_write_reg(pmeter->i2c, 0x9C, 0x00);
+	s2mu107_write_reg(pmeter->i2c, 0x9D, 0x00);
+	s2mu107_write_reg(pmeter->i2c, 0x9E, 0xCD);
 
 	pmeter->trim_updated = false;
 
@@ -584,7 +623,6 @@ static void s2mu107_powermeter_initial(struct s2mu107_pmeter_data *pmeter)
 		else
 			s2mu107_pmeter_trim_update(pmeter, DISABLE);
 	}
-
 }
 
 static int s2mu107_pmeter_probe(struct platform_device *pdev)
@@ -614,12 +652,14 @@ static int s2mu107_pmeter_probe(struct platform_device *pdev)
 
 	psy_cfg.drv_data = pmeter;
 
+	INIT_DELAYED_WORK(&pmeter->vchgin_work, s2mu107_chgin_isr_work);
 	pmeter->psy_pm = power_supply_register(&pdev->dev, &pmeter->psy_pm_desc, &psy_cfg);
 	if (IS_ERR(pmeter->psy_pm)) {
 		pr_err("%s: Failed to Register psy_chg\n", __func__);
 		ret = PTR_ERR(pmeter->psy_pm);
 		goto err_power_supply_register;
 	}
+	mutex_init(&pmeter->pmeter_mutex);
 
 	pmeter->irq_vchgin = s2mu107->pdata->irq_base + S2MU107_PM_IRQ1_VCHGINI;
 	ret = request_threaded_irq(pmeter->irq_vchgin, NULL,
@@ -627,6 +667,14 @@ static int s2mu107_pmeter_probe(struct platform_device *pdev)
 	if (ret < 0) {
 		pr_err("%s: Fail to request SYS in IRQ: %d: %d\n",
 				__func__, pmeter->irq_vchgin, ret);
+	}
+
+	pmeter->irq_ichgin = s2mu107->pdata->irq_base + S2MU107_PM_IRQ2_ICHGINI;
+	ret = request_threaded_irq(pmeter->irq_ichgin, NULL,
+			s2mu107_ichgin_isr, 0, "ichgin-irq", pmeter);
+	if (ret < 0) {
+		pr_err("%s: Fail to request SYS in IRQ: %d: %d\n",
+				__func__, pmeter->irq_ichgin, ret);
 	}
 
 	s2mu107_powermeter_initial(pmeter);

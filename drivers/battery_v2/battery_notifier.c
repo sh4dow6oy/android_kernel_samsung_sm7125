@@ -1,29 +1,8 @@
-/*
- *  battery_notifier.c
- *  Samsung Mobile Battery Notifier Driver
- *
- * Copyright (C) 2017 Samsung Electronics, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
- *
- */
 #include <linux/device.h>
 
 #include <linux/notifier.h>
 #include <linux/battery/battery_notifier.h>
 #include <linux/sec_class.h>
-
 
 #define DEBUG
 #define SET_BATTERY_NOTIFIER_BLOCK(nb, fn, dev) do {	\
@@ -205,7 +184,7 @@ int battery_notifier_init(void)
 	charger_device = sec_device_create(0, NULL, "charger_notifier");
 	pdic_device = sec_device_create(0, NULL, "pdic_notifier");
 	if (IS_ERR(charger_device)) {
-		pr_err("%s Failed to create device(charger_notifier)!\n", __func__);
+		pr_err("%s Failed to create device(charer_notifier)!\n", __func__);
 		ret = -ENODEV;
 		goto out;
 	}

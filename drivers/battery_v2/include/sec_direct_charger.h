@@ -25,8 +25,6 @@
 #define SEC_DIRECT_CHG_MIN_VBAT			3100
 #define SEC_DIRECT_CHG_MAX_VBAT			4200
 
-extern bool is_s2mu107_dc;
-
 typedef enum _sec_direct_chg_src {
 	SEC_DIRECT_CHG_CHARGING_SOURCE_SWITCHING = 0,
 	SEC_DIRECT_CHG_CHARGING_SOURCE_DIRECT,
@@ -71,6 +69,7 @@ struct sec_direct_charger_info {
 	unsigned int charger_mode_main;
 	unsigned int charger_mode_direct;
 	unsigned int dc_retry_cnt;
+
 
 	int cable_type;
 	int input_current;

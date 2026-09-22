@@ -1,5 +1,5 @@
 /*
- *  mfc_charger.c
+ *  mfc_s2miw04_charger.c
  *  Samsung MFC IC Charger Driver
  *
  *  Copyright (C) 2016 Samsung Electronics
@@ -15,7 +15,7 @@
  *
  */
 
-#include "include/charger/mfc_charger.h"
+#include "include/charger/mfc_s2miw04_charger.h"
 #include <linux/errno.h>
 #include <linux/version.h>
 #include <linux/device.h>
@@ -44,18 +44,12 @@
 #define ENABLE 1
 #define DISABLE 0
 #define CMD_CNT 3
-#define ISR_CNT 10
 #define MAX_I2C_ERROR_COUNT		30
 
 #define MAX_BUF 255
-u8 ADT_buffer_rdata[MAX_BUF] = {0, };
-u8 adt_readSize;
-bool is_shutdn = false;
-
-/* Logic to call repair utility   */
-#define MAX_MTP_PGM_CNT  3
-int pgmCnt = 0;
-bool repairEn = false;
+static u8 ADT_buffer_rdata[MAX_BUF] = {0, };
+static u8 adt_readSize;
+static bool is_shutdn = false;
 
 #if defined(CONFIG_WIRELESS_CHARGER_HAL_MFC)
 extern unsigned int mfc_chip_id_now;
@@ -70,6 +64,19 @@ extern unsigned int wireless_fw_ver_param;
 extern unsigned int wireless_chip_id_param;
 extern unsigned int wireless_fw_mode_param;
 #endif
+
+static const u16 mfc_lsi_vout_val16[] = {
+	0x0088, /* MFC_VOUT_5V */
+	0x00A1, /* MFC_VOUT_5_5V */
+	0x00BA, /* MFC_VOUT_6V */
+	0x00EC, /* MFC_VOUT_7V */
+	0x011E, /* MFC_VOUT_8V */
+	0x0150, /* MFC_VOUT_9V */
+	0x0182, /* MFC_VOUT_10V */
+	0x01B4, /* MFC_VOUT_11V */
+	0x01E6, /* MFC_VOUT_12V */
+	0x01ff, /* MFC_VOUT_12_5V */
+};
 
 static char *rx_device_type_str[] = {
 	"No Dev",
@@ -112,11 +119,10 @@ static char *rx_vout_str[] = {
 };
 
 static struct device_attribute mfc_attrs[] = {
-	MFC_ATTR(mfc_addr),
-	MFC_ATTR(mfc_size),
-	MFC_ATTR(mfc_data),
-	MFC_ATTR(mfc_packet),	
-	MFC_ATTR(mfc_flicker_test),
+	MFC_S2MIW04_ATTR(mfc_addr),
+	MFC_S2MIW04_ATTR(mfc_size),
+	MFC_S2MIW04_ATTR(mfc_data),
+	MFC_S2MIW04_ATTR(mfc_packet),	
 };
 
 static enum power_supply_property mfc_charger_props[] = {
@@ -259,64 +265,6 @@ static int mfc_reg_update(struct i2c_client *client, u16 reg, u8 val, u8 mask)
 	return ret;
 }
 
-void itoh(u8 *dest, char *hex, int len)
-{
-	int i = 0;
-
-	while (i < len) {
-		snprintf(hex + i*2, len*2, "%x", dest[i]);
-		i++;
-	}
-}
-
-#if 0
-static u8 htoi(const char *hexa)
-{
-	char ch = 0;
-	u8 deci = 0;
-	const char *sp = hexa;
-	while (*sp) {
-		deci *= 16;
-		if ('0' <= *sp && *sp <= '9')
-			ch = *sp - '0';
-		if ('A' <= *sp && *sp <= 'F')
-			ch = *sp - 'A' + 10;
-		if ('a' <= *sp && *sp <= 'f')
-			ch = *sp - 'a' + 10;
-		deci += ch;
-		sp++;
-	}
-	return deci;
-}
-
-static int mfc_str_to_deci(const char *data, int size, u8 *dest)
-{
-	int ret = 0;
-	int i = 0, str_len = 0;
-	char temp_str[3] = {0, };
-
-	if (data == NULL) {
-		pr_info("%s: given data is not valid !\n", __func__);
-		return -1;
-	}
-
-	pr_info("%s : data = %s, size = %d \n", __func__, data, size);
-
-	str_len = size * 2;
-	while(i < str_len) {
-		strncpy(temp_str, (char *)data + i, 2);
-		dest[i / 2] = htoi(temp_str);
-		pr_info("%s: 0x%x, %d\n", __func__, dest[i / 2], dest[i / 2]);
-		i += 2;
-	}
-
-	for(i=0; i < size; i++)
-		pr_info("%s: 0x%x, %d\n", __func__, dest[i], dest[i]);
-
-	return ret;
-}
-#endif
-
 #if defined(CONFIG_WIRELESS_IC_PARAM)
 static int mfc_set_wireless_param(u8 chip_id, int fw_ver)
 {
@@ -373,7 +321,7 @@ static int mfc_set_wireless_ic_param(struct mfc_charger_data *charger, u8 chip_i
 			wireless_fw_ver_param = fw_ver & 0xFFFF;
 			pr_info("%s: succeed. chip_id(0x%02X), fw_ver(0x%04X)\n",
 				__func__, wireless_chip_id_param, wireless_fw_ver_param);
-		}
+		}		
 	} else if (!lpcharge) {
 		pr_info("%s: not yet boot_complete\n", __func__);
 	}
@@ -431,7 +379,7 @@ static int mfc_get_chip_id(struct mfc_charger_data *charger)
 
 	ret = mfc_reg_read(charger->client, MFC_CHIP_ID_L_REG, &chip_id);
 	if (ret >= 0) {
-		if (chip_id == 0x04) {
+		if (chip_id == MFC_CHIP_ID_S2MIW04) {
 			charger->chip_id = MFC_CHIP_LSI;
 			pr_info("%s: LSI CHIP(0x%x)\n", __func__, chip_id);
 		} else { /* 0x20 */
@@ -525,28 +473,25 @@ static int mfc_get_adc(struct mfc_charger_data *charger, int adc_type)
 			ret = mfc_reg_read(charger->client, MFC_TRX_OP_FREQ_L_REG, &data[0]);
 			ret = mfc_reg_read(charger->client, MFC_TRX_OP_FREQ_H_REG, &data[1]);
 			if (ret >= 0) {
-				ret = (data[0] | (data[1] << 8));
+				ret = (data[0] | (data[1] << 8)) / 10;
 			} else
 				ret = -1;
 			break;
-		case MFC_ADC_TX_OP_FRQ:
+		case MFC_ADC_TX_MAX_OP_FRQ:
 			ret = mfc_reg_read(charger->client, MFC_TX_MAX_OP_FREQ_L_REG, &data[0]);
 			ret = mfc_reg_read(charger->client, MFC_TX_MAX_OP_FREQ_H_REG, &data[1]);
 			if (ret >= 0) {
-				ret = (int)(60000 / (data[0] | (data[1] << 8)));
+				ret = (data[0] | (data[1] << 8)) / 10;
 			} else
 				ret = -1;
 			break;
 		case MFC_ADC_TX_MIN_OP_FRQ:
 			ret = mfc_reg_read(charger->client, MFC_TX_MIN_OP_FREQ_L_REG, &data[0]);
-			if (ret < 0)
-				break;
-
 			ret = mfc_reg_read(charger->client, MFC_TX_MIN_OP_FREQ_H_REG, &data[1]);
-			if (ret < 0)
-				break;
-
-			ret = (int)(60000 / (data[0] | (data[1] << 8)));
+			if (ret >= 0) {
+				ret = (data[0] | (data[1] << 8)) / 10;
+			} else
+			ret = -1;
 			break;
 		case MFC_ADC_PING_FRQ:
 			ret = mfc_reg_read(charger->client, MFC_RX_PING_FREQ_L_REG, &data[0]);
@@ -572,11 +517,35 @@ static int mfc_get_adc(struct mfc_charger_data *charger, int adc_type)
 			} else
 				ret = -1;
 			break;
+		case MFC_ADC_TX_PING_FRQ:
+			ret = mfc_reg_read(charger->client, MFC_TX_PING_FREQ_L_REG, &data[0]);
+			ret = mfc_reg_read(charger->client, MFC_TX_PING_FREQ_H_REG, &data[1]);
+			if (ret >= 0) {
+				ret = (data[0] | (data[1] << 8)) / 10;
+			} else
+				ret = -1;
+			break;
 		default:
 			break;
 	}
 
 	return ret;
+}
+
+/* CMA and CMB are controlled differently according to HW design */
+static void mfc_cma_cmb_onoff(struct mfc_charger_data *charger, bool cma_on, bool cmb_on)
+{
+	u8 data;
+	int ret;
+
+	data = ((cma_on) ? 0xC0 : 0x00) | ((cmb_on) ? 0x30 : 0x00);
+	pr_info("%s: val(0x%x)\n", __func__, data);
+	mfc_reg_write(charger->client, MFC_CMFET_CTRL_REG, data);
+	ret = mfc_reg_read(charger->client, MFC_CMFET_CTRL_REG, &data);
+	if (ret < 0)
+		pr_err("%s: fail to read MFC_CMFET_CTRL_REG (%d)\n", __func__, ret);
+	else
+		pr_info("%s: read_val (0x%x)\n", __func__, data);
 }
 
 static void mfc_set_wpc_en(struct mfc_charger_data *charger, char flag, char on)
@@ -625,25 +594,56 @@ static void mfc_set_wpc_en(struct mfc_charger_data *charger, char flag, char on)
 
 static void mfc_set_vout(struct mfc_charger_data *charger, int vout)
 {
-	mfc_reg_write(charger->client, MFC_VOUT_SET_REG, mfc_idt_vout_val[vout]);
+	u8 data[2] = {0,};
+
+	if (vout >= MFC_VOUT_10V) {
+		if (charger->pdata->cable_type == SEC_WIRELESS_PAD_WPC_HV_20)
+			mfc_cma_cmb_onoff(charger, true, true);
+		else
+			mfc_cma_cmb_onoff(charger, false, true);
+		mfc_reg_write(charger->client, MFC_ACTIVE_LOAD_CONTROL_REG, 0x01);
+	}
+
+	data[0] = mfc_lsi_vout_val16[vout] & 0xff;
+	data[1] = (mfc_lsi_vout_val16[vout] & 0xff00) >> 8;
+	mfc_reg_write(charger->client, MFC_VOUT_SET_H_REG, data[1]);
+	mfc_reg_write(charger->client, MFC_VOUT_SET_L_REG, data[0]);	
 	msleep(100);
 
-	pr_info("%s vout(%s, %d) read = %d mV\n", __func__, rx_vout_str[vout], vout, mfc_get_adc(charger, MFC_ADC_VOUT));
+	pr_info("%s set vout(%s, 0x%04X) read = %d mV\n", __func__,
+		rx_vout_str[vout], (data[0] | (data[1] << 8)), mfc_get_adc(charger, MFC_ADC_VOUT));
 	charger->pdata->vout_status = vout;
+
+	if (vout <= MFC_VOUT_5_5V) {
+		if (charger->is_full_status) {
+			mfc_cma_cmb_onoff(charger, false, true);
+			mfc_reg_write(charger->client, MFC_ACTIVE_LOAD_CONTROL_REG, 0x01);
+		} else {
+			if (charger->input_current < 700) //700mA
+				mfc_cma_cmb_onoff(charger, true, false);
+			else
+				mfc_cma_cmb_onoff(charger, false, true);
+			mfc_reg_write(charger->client, MFC_ACTIVE_LOAD_CONTROL_REG, 0x00);
+		}
+	}		
 }
 
 static int mfc_get_vout(struct mfc_charger_data *charger)
 {
-	u8 data;
+	u8 data[2] = {0,};
 	int ret;
-	ret = mfc_reg_read(charger->client, MFC_VOUT_SET_REG, &data);
+
+	ret = mfc_reg_read(charger->client, MFC_VOUT_SET_L_REG, &data[0]);
+	ret = mfc_reg_read(charger->client, MFC_VOUT_SET_H_REG, &data[1]);
+
 	if (ret < 0) {
 		pr_err("%s: fail to read vout. (%d)\n", __func__, ret);
-		return ret;
-	} else
-		pr_info("%s: vout(0x%x)\n", __func__, data);
+	} else {
+		ret = (data[0] | (data[1] << 8));
+		pr_info("%s: vout(0x%04x)\n", __func__, ret);
+	}
 
-	return data;
+	return ret;
 }
 
 static void mfc_uno_on(struct mfc_charger_data *charger, bool on)
@@ -664,27 +664,17 @@ static void mfc_uno_on(struct mfc_charger_data *charger, bool on)
 		value.intval = 0;
 		psy_do_property(charger->pdata->wired_charger_name, set,
 			POWER_SUPPLY_PROP_CHARGE_UNO_CONTROL, value);
-
-		if (delayed_work_pending(&charger->wpc_tx_op_freq_work)) {
-			wake_unlock(&charger->wpc_tx_opfq_lock);
-			cancel_delayed_work(&charger->wpc_tx_op_freq_work);
-		}
 		pr_info("%s: DISABLE\n", __func__);
 	}
 }
 
-static void mfc_rpp_set(struct mfc_charger_data *charger)
+static void mfc_rpp_set(struct mfc_charger_data *charger, u8 val)
 {
 	u8 data;
 	int ret;
 
-	if (charger->led_cover) {
-		pr_info("%s: LED cover exists. RPP 3/4 (0x%x)\n", __func__, charger->pdata->wc_cover_rpp);
-		mfc_reg_write(charger->client, MFC_RPP_SCALE_COEF_REG, charger->pdata->wc_cover_rpp);
-	} else {
-		pr_info("%s: LED cover not exists. RPP 1/2 (0x%x)\n", __func__, charger->pdata->wc_hv_rpp);
-		mfc_reg_write(charger->client, MFC_RPP_SCALE_COEF_REG, charger->pdata->wc_hv_rpp);
-	}
+	pr_info("%s: Scale Factor %d\n", __func__, val);
+	mfc_reg_write(charger->client, MFC_RPP_SCALE_COEF_REG, val);
 	msleep(5);
 	ret = mfc_reg_read(charger->client, MFC_RPP_SCALE_COEF_REG, &data);
 	if (ret < 0) {
@@ -709,11 +699,48 @@ static void mfc_fod_set_cv(struct mfc_charger_data *charger)
 {
 	int i = 0;
 
+	if (!charger->pdata->fod_data_cv) {
+		pr_info("%s: no data\n", __func__);
+		return;
+	}
+
 	pr_info("%s\n", __func__);
 
 	if (charger->pdata->cable_type != SEC_WIRELESS_PAD_NONE) {
 		for (i = 0; i < MFC_NUM_FOD_REG; i++)
 			mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, charger->pdata->fod_data_cv[i]);
+	}
+}
+
+static void mfc_fod_set_dream(struct mfc_charger_data *charger)
+{
+	int i = 0;
+
+	if (!charger->pdata->fod_dream_data) {
+		pr_info("%s: no data\n", __func__);
+		return;
+	}
+
+	pr_info("%s\n", __func__);
+
+	for (i = 0; i < MFC_NUM_FOD_REG; i++)
+		mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, charger->pdata->fod_dream_data[i]);
+}
+
+static void mfc_fod_set_dream_cv(struct mfc_charger_data *charger)
+{
+	int i = 0;
+
+	if (!charger->pdata->fod_dream_cv_data) {
+		pr_info("%s: no data\n", __func__);
+		return;
+	}
+
+	pr_info("%s\n", __func__);
+
+	if (charger->pdata->cable_type != SEC_WIRELESS_PAD_NONE) {
+		for (i = 0; i < MFC_NUM_FOD_REG; i++)
+			mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, charger->pdata->fod_dream_cv_data[i]);
 	}
 }
 
@@ -725,28 +752,58 @@ static void mfc_fod_set_cs100(struct mfc_charger_data *charger)
 
 	if (charger->pdata->cable_type != SEC_WIRELESS_PAD_NONE) {
 		for (i = 0; i < MFC_NUM_FOD_REG; i++)
-			if (i % 2)
-				mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, 0x7f);
-			else
-				mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, 0xff);
+			mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, 0xFF);
 	}
 }
 
-static void mfc_set_tx_op_freq(struct mfc_charger_data *charger, unsigned int op_feq)
+static void mfc_set_tx_conflict_current(struct mfc_charger_data *charger, int tx_cf_current)
+{
+	u8 data = (u8)(tx_cf_current / 100);
+
+	mfc_reg_write(charger->client, MFC_TX_CONFLICT_CURRENT_REG, data);
+	pr_info("%s: current = %d, data = 0x%x\n", __func__, tx_cf_current, data);
+}
+
+static void mfc_set_tx_freq(struct mfc_charger_data *charger,
+	unsigned int max_op, unsigned int min_op, unsigned int ping)
 {
 	u8 data[2] = {0,};
 
-	pr_info("%s op feq = %d KHz\n", __func__, op_feq);
+	pr_info("%s: before - op(%d, %d), ping(%d)\n", __func__, max_op, min_op, ping);
 
-	op_feq = (int)(60000 / op_feq); 
-	data[0] = op_feq & 0xff;
-	data[1] = (op_feq & 0xff00) >> 8;
-
+	data[0] = max_op & 0xff;
+	data[1] = (max_op & 0xff00) >> 8;
 	mfc_reg_write(charger->client, MFC_TX_MAX_OP_FREQ_L_REG, data[0]);
 	mfc_reg_write(charger->client, MFC_TX_MAX_OP_FREQ_H_REG, data[1]);
 
+	data[0] = min_op & 0xff;
+	data[1] = (min_op & 0xff00) >> 8;
+	mfc_reg_write(charger->client, MFC_TX_MIN_OP_FREQ_L_REG, data[0]);
+	mfc_reg_write(charger->client, MFC_TX_MIN_OP_FREQ_H_REG, data[1]);
+
+	data[0] = ping & 0xff;
+	data[1] = (ping & 0xff00) >> 8;
+	mfc_reg_write(charger->client, MFC_TX_PING_FREQ_L_REG, data[0]);
+	mfc_reg_write(charger->client, MFC_TX_PING_FREQ_H_REG, data[1]);
+
 	msleep(500);
-	pr_info("%s op feq = %d KHz\n", __func__, mfc_get_adc(charger, MFC_ADC_TX_OP_FRQ));
+	pr_info("%s: after - op(%d, %d), ping(%d)\n", __func__,
+		mfc_get_adc(charger, MFC_ADC_TX_MAX_OP_FRQ),
+		mfc_get_adc(charger, MFC_ADC_TX_MIN_OP_FRQ),
+		mfc_get_adc(charger, MFC_ADC_TX_PING_FRQ));
+}
+
+static void mfc_set_tx_ping_freq(struct mfc_charger_data *charger,
+	unsigned int ping)
+{
+	u8 data[2] = {0,};
+
+	pr_info("%s: ping(%d)\n", __func__, ping);
+
+	data[0] = ping & 0xff;
+	data[1] = (ping & 0xff00) >> 8;
+	mfc_reg_write(charger->client, MFC_TX_PING_FREQ_L_REG, data[0]);
+	mfc_reg_write(charger->client, MFC_TX_PING_FREQ_H_REG, data[1]);
 }
 
 static void mfc_set_tx_min_op_freq(struct mfc_charger_data *charger, unsigned int op_freq)
@@ -755,7 +812,6 @@ static void mfc_set_tx_min_op_freq(struct mfc_charger_data *charger, unsigned in
 
 	pr_info("%s: op freq = %d KHz\n", __func__, op_freq);
 
-	op_freq = (int)(60000 / op_freq);
 	data[0] = op_freq & 0xFF;
 	data[1] = (op_freq & 0xFF00) >> 8;
 	mfc_reg_write(charger->client, MFC_TX_MIN_OP_FREQ_L_REG, data[0]);
@@ -769,11 +825,17 @@ static void mfc_set_min_duty(struct mfc_charger_data *charger, unsigned int duty
 {
 	u8 data = 0;
 
-	data = (int)((duty * 256) / 100);
-
-	pr_info("%s min duty = %d%%(0x%x)\n", __func__, duty, data);
-
+	data = (duty * 2);
+	pr_info("%s: min duty = %d%%(0x%x)\n", __func__, duty, data);
 	mfc_reg_write(charger->client, MFC_TX_MIN_DUTY_SETTING_REG, data);
+}
+
+static u8 mfc_get_min_duty(struct mfc_charger_data* charger)
+{
+	u8 data = 0;
+
+	mfc_reg_read(charger->client, MFC_TX_MIN_DUTY_SETTING_REG, &data);
+	return data / 2;
 }
 
 static void mfc_set_tx_oc_fod(struct mfc_charger_data *charger)
@@ -787,63 +849,6 @@ static void mfc_set_tx_oc_fod(struct mfc_charger_data *charger)
 
 	mfc_reg_write(charger->client, MFC_TX_OC_FOD1_LIMIT_L_REG, data[0]);
 	mfc_reg_write(charger->client, MFC_TX_OC_FOD1_LIMIT_H_REG, data[1]);
-}
-
-static void mfc_fod_set_hero_5v(struct mfc_charger_data *charger)
-{
-	int i = 0;
-	u8 fod[12] = {0, };
-
-	pr_info("%s\n", __func__);
-
-	if (charger->pdata->fod_hero_5v_data) {
-		for (i = 0; i < MFC_NUM_FOD_REG; i++)
-			mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, charger->pdata->fod_hero_5v_data[i]);
-		msleep(2);
-		for (i = 0; i < MFC_NUM_FOD_REG; i++)
-			mfc_reg_read(charger->client, MFC_WPC_FOD_0A_REG+i, &fod[i]);
-
-		pr_info("%s: HERO 5V FOD(%d %d %d %d %d %d %d %d %d %d %d %d)\n", __func__,
-			fod[0], fod[1], fod[2], fod[3], fod[4], fod[5], fod[6], fod[7], fod[8], fod[9], fod[10], fod[11]);
-	}
-}
-
-static void mfc_fod_set_dream(struct mfc_charger_data *charger)
-{
-	int i = 0;
-	u8 fod[12] = {0, };
-
-	pr_info("%s\n", __func__);
-
-	if (charger->pdata->fod_dream_data) {
-		for (i = 0; i < MFC_NUM_FOD_REG; i++)
-			mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, charger->pdata->fod_dream_data[i]);
-		msleep(2);
-		for (i = 0; i < MFC_NUM_FOD_REG; i++)
-			mfc_reg_read(charger->client, MFC_WPC_FOD_0A_REG+i, &fod[i]);
-
-		pr_info("%s: DreamPad FOD(%d %d %d %d %d %d %d %d %d %d %d %d)\n", __func__,
-			fod[0], fod[1], fod[2], fod[3], fod[4], fod[5], fod[6], fod[7], fod[8], fod[9], fod[10], fod[11]);
-	}
-}
-
-static void mfc_fod_set_dream_cv(struct mfc_charger_data *charger)
-{
-	int i = 0;
-	u8 fod[12] = {0, };
-
-	pr_info("%s\n", __func__);
-
-	if (charger->pdata->fod_dream_cv_data) {
-		for (i = 0; i < MFC_NUM_FOD_REG; i++)
-			mfc_reg_write(charger->client, MFC_WPC_FOD_0A_REG+i, charger->pdata->fod_dream_cv_data[i]);
-		msleep(2);
-		for (i = 0; i < MFC_NUM_FOD_REG; i++)
-			mfc_reg_read(charger->client, MFC_WPC_FOD_0A_REG+i, &fod[i]);
-
-		pr_info("%s: DreamPad CV FOD(%d %d %d %d %d %d %d %d %d %d %d %d)\n", __func__,
-			fod[0], fod[1], fod[2], fod[3], fod[4], fod[5], fod[6], fod[7], fod[8], fod[9], fod[10], fod[11]);
-	}
 }
 
 static void mfc_set_cmd_l_reg(struct mfc_charger_data *charger, u8 val, u8 mask)
@@ -866,24 +871,6 @@ static void mfc_set_cmd_l_reg(struct mfc_charger_data *charger, u8 val, u8 mask)
 	} while ((temp != 0) && (i < 3));
 }
 
-void mfc_set_cmd_h_reg(struct mfc_charger_data *charger, u8 val, u8 mask)
-{
-	u8 temp = 0;
-	int ret = 0, i = 0;
-
-	do {
-		pr_info("%s\n", __func__);
-		ret = mfc_reg_update(charger->client, MFC_AP2MFC_CMD_H_REG, val, mask); // command
-		if (ret >= 0) {
-			msleep(250);
-			ret = mfc_reg_read(charger->client, MFC_AP2MFC_CMD_H_REG, &temp); // check out set bit exists
-			if (ret < 0 || i > 3)
-				break;
-		}
-		i++;
-	} while ((temp != 0) && (i < 3));
-}
-
 static void mfc_send_eop(struct mfc_charger_data *charger, int health_mode)
 {
 	int i = 0;
@@ -891,6 +878,7 @@ static void mfc_send_eop(struct mfc_charger_data *charger, int health_mode)
 
 	pr_info("%s: health_mode(0x%x), cable_type(%d)\n",
 		__func__, health_mode, charger->pdata->cable_type);
+
 	switch(health_mode) {
 	case POWER_SUPPLY_HEALTH_OVERHEAT:
 	case POWER_SUPPLY_HEALTH_OVERHEATLIMIT:
@@ -931,7 +919,7 @@ static void mfc_send_packet(struct mfc_charger_data *charger, u8 header, u8 rx_d
 	mfc_reg_write(charger->client, MFC_WPC_RX_DATA_COM_REG, rx_data_com);
 
 	for (i = 0; i < data_size; i++) {
-		mfc_reg_write(charger->client, MFC_WPC_RX_DATA_VALUE0_REG+ i, data_val[i]);
+		mfc_reg_write(charger->client, MFC_WPC_RX_DATA_VALUE0_REG + i, data_val[i]);
 	}
 	mfc_set_cmd_l_reg(charger, MFC_CMD_SEND_TRX_DATA_MASK, MFC_CMD_SEND_TRX_DATA_MASK);
 }
@@ -1001,6 +989,7 @@ static void mfc_send_command(struct mfc_charger_data *charger, int cmd_mode)
 			mfc_reg_read(charger->client, MFC_AP2MFC_CMD_L_REG, &data_val[0]);
 			msleep(100);
 		}
+		mfc_rpp_set(charger, 128);
 		break;
 	case MFC_AFC_CONF_10V_TX:
 		for (i = 0; i < CMD_CNT; i++) {
@@ -1013,6 +1002,7 @@ static void mfc_send_command(struct mfc_charger_data *charger, int cmd_mode)
 			mfc_reg_read(charger->client, MFC_AP2MFC_CMD_L_REG, &data_val[0]);
 			msleep(100);
 		}
+		mfc_rpp_set(charger, 64);
 		break;
 	case MFC_AFC_CONF_12V_TX:
 		for (i = 0; i < CMD_CNT; i++) {
@@ -1025,6 +1015,7 @@ static void mfc_send_command(struct mfc_charger_data *charger, int cmd_mode)
 			mfc_reg_read(charger->client, MFC_AP2MFC_CMD_L_REG, &data_val[0]);
 			msleep(100);
 		}
+		mfc_rpp_set(charger, 64);
 		break;
 	case MFC_AFC_CONF_12_5V_TX:
 		for (i = 0; i < CMD_CNT; i++) {
@@ -1037,7 +1028,8 @@ static void mfc_send_command(struct mfc_charger_data *charger, int cmd_mode)
 			mfc_reg_read(charger->client, MFC_AP2MFC_CMD_L_REG, &data_val[0]);
 			msleep(100);
 		}
-		break;
+		mfc_rpp_set(charger, 64);
+		break;		
 	case MFC_AFC_CONF_20V_TX:
 		for (i = 0; i < CMD_CNT; i++) {
 			cmd = WPC_COM_AFC_SET;
@@ -1049,6 +1041,7 @@ static void mfc_send_command(struct mfc_charger_data *charger, int cmd_mode)
 			mfc_reg_read(charger->client, MFC_AP2MFC_CMD_L_REG, &data_val[0]);
 			msleep(100);
 		}
+		mfc_rpp_set(charger, 32);
 		break;		
 	case MFC_LED_CONTROL_ON:
 		pr_info("%s led on\n", __func__);
@@ -1107,12 +1100,6 @@ static void mfc_send_command(struct mfc_charger_data *charger, int cmd_mode)
 		pr_info("%s Enter PHM\n", __func__);
 		cmd = WPC_COM_ENTER_PHM;
 		data_val[0] = 0x01; /* Enter PHM */
-		mfc_send_packet(charger, MFC_HEADER_AFC_CONF, cmd, data_val, 1);
-		break;
-	case MFC_SET_OP_FREQ:
-		pr_info("%s set tx op freq\n", __func__);
-		cmd = WPC_COM_OP_FREQ_SET;
-		data_val[0] = 0x69; // 120.5khz
 		mfc_send_packet(charger, MFC_HEADER_AFC_CONF, cmd, data_val, 1);
 		break;
 	default:
@@ -1233,6 +1220,8 @@ static bool mfc_tx_function_check(struct mfc_charger_data *charger)
 	mfc_reg_read(charger->client, MFC_TX_RXID1_READ_REG, &reg_f2);
 	mfc_reg_read(charger->client, MFC_TX_RXID3_READ_REG, &reg_f4);
 
+	pr_info("@Tx_Mode %s: 0x%x 0x%x\n", __func__, reg_f2, reg_f4);
+
 	if ((reg_f2 == 0x42) && (reg_f4 == 0x64))
 		return true;
 	else
@@ -1274,12 +1263,16 @@ static void mfc_set_tx_iout(struct mfc_charger_data *charger, unsigned int iout)
 
 static void mfc_set_tx_vout(struct mfc_charger_data *charger, unsigned int vout)
 {
+	u8 vout_data_l = 0, vout_data_h = 0;
 
-	u8 vout_data = 0;
+	vout = 0x88 + (vout * 25);
+	vout_data_l = 0xFF & vout;
+	vout_data_h = 0xFF & (vout >> 8);
 
-	vout_data = 0x32 + (vout * 5);
-	mfc_reg_write(charger->client, MFC_VUNO_REG, vout_data);
-	pr_info("@Tx_Mode %s: Tx Vout set %d(0x%x)\n", __func__, vout, vout_data);
+	mfc_reg_write(charger->client, MFC_VOUT_SET_L_REG, vout_data_l);
+	mfc_reg_write(charger->client, MFC_VOUT_SET_H_REG, vout_data_h);
+
+	pr_info("@Tx_Mode %s: Tx Vout set %d(0x%x 0x%x)\n", __func__, vout, vout_data_h, vout_data_l);
 }
 
 static void mfc_print_buffer(struct mfc_charger_data *charger, u8 * buffer, u8 size)
@@ -1406,11 +1399,8 @@ static void mfc_auth_adt_send(struct mfc_charger_data *charger, u8 * srcData, in
 {
 	u8 temp;
 	int ret = 0;
-	u8 irq_src[2];
 
-	mfc_reg_read(charger->client, MFC_INT_A_L_REG, &irq_src[0]);
-	mfc_reg_read(charger->client, MFC_INT_A_H_REG, &irq_src[1]);
-
+	mfc_cma_cmb_onoff(charger, false, true);
 	charger->adt_transfer_status = WIRELESS_AUTH_SENT;
 	ret = mfc_auth_adt_write(charger, srcData, srcSize); /* write buff fw datas to send fw datas to tx */ 
 
@@ -1425,11 +1415,6 @@ static void mfc_auth_adt_send(struct mfc_charger_data *charger, u8 * srcData, in
 
 	mfc_reg_update(charger->client, MFC_INT_A_ENABLE_H_REG,
 					MFC_STAT_H_ADT_SENT_MASK, MFC_STAT_H_ADT_SENT_MASK);
-
-	/* clear intterupt */
-	mfc_reg_write(charger->client, MFC_INT_A_CLEAR_L_REG, irq_src[0]); // clear int
-	mfc_reg_write(charger->client, MFC_INT_A_CLEAR_H_REG, irq_src[1]); // clear int
-	mfc_set_cmd_l_reg(charger, 0x20, MFC_CMD_CLEAR_INT_MASK); // command	
 }
 
 /* uno on/off control function */
@@ -1445,14 +1430,7 @@ static void mfc_set_tx_power(struct mfc_charger_data *charger, bool on)
 		msleep(200);
 
 		charger->pdata->otp_firmware_ver = mfc_get_firmware_version(charger, MFC_RX_FIRMWARE);
-
-		cancel_delayed_work(&charger->wpc_tx_op_freq_work);
-		wake_lock(&charger->wpc_tx_opfq_lock);
-		queue_delayed_work(charger->wqueue,
-			&charger->wpc_tx_op_freq_work, msecs_to_jiffies(5000));
 		charger->wc_rx_fod = false;
-		pr_info("%s : tx op freq = %dKhz\n", __func__, mfc_get_adc(charger, MFC_ADC_TX_OP_FRQ));
-		mfc_set_min_duty(charger, 30);
 	} else {
 		pr_info("@Tx_Mode %s: Turn Off TX Power, and reset UNO config\n", __func__);
 
@@ -1463,7 +1441,9 @@ static void mfc_set_tx_power(struct mfc_charger_data *charger, bool on)
 			POWER_SUPPLY_EXT_PROP_WIRELESS_TX_VOUT, value);
 
 		charger->wc_rx_connected = false;
+		charger->wc_rx_type = NO_DEV;
 		charger->gear_start_time = 0;
+		charger->duty_min = 20;
 #if defined(CONFIG_TX_GEAR_PHM_VOUT_CTRL)
 		charger->tx_gear_phm = 0;
 #endif
@@ -1472,11 +1452,16 @@ static void mfc_set_tx_power(struct mfc_charger_data *charger, bool on)
 		cancel_delayed_work(&charger->wpc_rx_connection_work);
 		cancel_delayed_work(&charger->wpc_tx_isr_work);
 		cancel_delayed_work(&charger->wpc_tx_phm_work);
+		cancel_delayed_work(&charger->wpc_tx_duty_min_work);
+#if defined(CONFIG_SEC_FACTORY)
+		cancel_delayed_work(&charger-> evt2_err_detect_work);
+#endif
 		alarm_cancel(&charger->phm_alarm);
 		wake_unlock(&charger->wpc_tx_phm_lock);
 		wake_unlock(&charger->wpc_rx_connection_lock);
 		wake_unlock(&charger->wpc_rx_det_lock);
 		wake_unlock(&charger->wpc_tx_wake_lock);
+		wake_unlock(&charger->wpc_tx_duty_min_lock);
 
 		charger->tx_status = SEC_TX_OFF;
 	}
@@ -1516,9 +1501,9 @@ static void mfc_wpc_rx_connection_work(struct work_struct *work)
 			cancel_delayed_work(&charger->wpc_rx_type_det_work);
 		}
 
-		if (delayed_work_pending(&charger->wpc_tx_op_freq_work)) {
-			wake_unlock(&charger->wpc_tx_opfq_lock);
-			cancel_delayed_work(&charger->wpc_tx_op_freq_work);
+		if (delayed_work_pending(&charger->wpc_tx_duty_min_work)) {
+			wake_unlock(&charger->wpc_tx_duty_min_lock);
+			cancel_delayed_work(&charger->wpc_tx_duty_min_work);
 		}
 	}
 
@@ -1726,713 +1711,166 @@ static int mfc_reg_multi_write(struct i2c_client *client, u16 reg, const u8 * va
 	return ret;
 }
 
-static int LoadOTPLoaderInRAM(struct mfc_charger_data *charger, u16 addr)
+static int mfc_write_fw_flash_LSI(struct mfc_charger_data *charger, u8 addr_l, u8 addr_h, const u8 *wData, int length)
 {
-	int i, size;
-	u8 data[1024];
+	int i;
+	u8 ucTmpBuf[36];
 
-	if (mfc_reg_multi_write_verify(charger->client, addr, MTPBootloader9320, sizeof(MTPBootloader9320)) < 0) {
-		pr_err("%s,fail", __func__);
+	if (length <= 0) {
+		pr_err("%s: skip. length is 0\n", __func__);
+		return -1;
 	}
-	size = sizeof(MTPBootloader9320);
-	i = 0;
-	while(size > 0) {
-		if (mfc_reg_multi_read(charger->client, addr+i, data+i, 16) < 0) {
-			pr_err("%s, read failed(%d)", __func__, addr+i);
-			return MFC_FWUP_ERR_ADDR_READ_FAIL;
-		}
-		i += 16;
-		size -= 16;
+
+	ucTmpBuf[0] = length / 4;
+	ucTmpBuf[1] = addr_l;
+	ucTmpBuf[2] = addr_h;
+
+	for (i = 0; i < length; i++)
+		ucTmpBuf[i + 3] = wData[i];
+
+	if (mfc_reg_multi_write(charger->client, 0x1F11, ucTmpBuf, length + 3) < 0) {
+		pr_err("%s: failed to write ucTmpBuf(%d bytes) at 0x1F11\n", __func__, length + 3);
+		return -1;
 	}
-	size = sizeof(MTPBootloader9320);
-	if (datacmp(data, MTPBootloader9320, size)) {
-		pr_err("%s, data is not matched\n", __func__);
-		return MFC_FWUP_ERR_DATA_NOT_MATCH;
+
+	if (mfc_reg_write(charger->client, 0x1F10, 0x52) < 0) {
+		pr_err("%s: failed to write 0x52 at 0x1F10\n", __func__);
+		return -1;
 	}
-	return MFC_FWUP_ERR_SUCCEEDED;
+
+	return 0;
 }
 
-static int mfc_firmware_verify(struct mfc_charger_data *charger)
+//#define LSI_MFC_FW_BOOT_CODE_INCLUDE
+#define LSI_MFC_FW_FLASH_START_ADDR		0x0C00
+static int PgmOTPwRAM_LSI(struct mfc_charger_data *charger, unsigned short OtpAddr,
+					  const u8 * srcData, int srcOffs, int size)
 {
-	int ret = 0;
-	const u16 sendsz = 16;
-	size_t i = 0;
-	int block_len = 0;
-	int block_addr = 0;
-	u8 rdata[sendsz+2];
-	unsigned int work_state;
+	int addr;
+	int start_addr;
+	u8 wdata[4] = {0,};
+//	static int startAddr;
+	u16 temp;
+	u8 addr_l, addr_h;
+	char chksum;
+	int i, j;
+	int ret, retry=3;
+	u8 fw_ver[4] = {0,};
+	u8 fw_ver_bin[4] = {0,};
 
-	mutex_lock(&charger->fw_lock);
-	/* check delayed work state */
-	work_state = work_busy(&charger->wpc_fw_update_work.work);
-	pr_info("%s: check fw_work state(0x%x)\n", __func__, work_state);
-	if (work_state & (WORK_BUSY_PENDING | WORK_BUSY_RUNNING)) {
-		pr_info("%s: skip update_fw!!\n", __func__);
-		goto skip_fw_verify;
+	mfc_reg_read(charger->client, MFC_FW_MAJOR_REV_L_REG, &fw_ver[0]);
+	mfc_reg_read(charger->client, MFC_FW_MAJOR_REV_H_REG, &fw_ver[1]);
+	pr_info("%s BEFORE rx major firmware version 0x%x\n",
+		__func__, fw_ver[0] | (fw_ver[1] << 8));
+	
+	mfc_reg_read(charger->client, MFC_FW_MINOR_REV_L_REG, &fw_ver[2]);
+	mfc_reg_read(charger->client, MFC_FW_MINOR_REV_H_REG, &fw_ver[3]);
+	pr_info("%s BEFORE rx minor firmware version 0x%x\n",
+		__func__, fw_ver[2] | (fw_ver[3] << 8));
+
+	memcpy(fw_ver_bin, &srcData[MFC_FW_VER_BIN_LSI], 4);
+	pr_info("%s NEW rx major firmware version 0x%x\n",
+		__func__, fw_ver_bin[0] | (fw_ver_bin[1] << 8));
+	pr_info("%s NEW rx minor firmware version 0x%x\n",
+		__func__, fw_ver_bin[2] | (fw_ver_bin[3] << 8));
+
+	pr_info("%s: Enter the flash mode (0x1F10)\n", __func__);
+	if (mfc_reg_write(charger->client, 0x1F10, 0x10) < 0) {
+		pr_err("%s: failed to enter the flash mode\n", __func__);
+		return MFC_FWUP_ERR_FAIL;
+	}
+	msleep(100);
+	pr_info("%s: Erase the flash memory\n", __func__);
+	if (mfc_reg_write(charger->client, 0x1F10, 0x44) < 0) {
+		pr_err("%s: failed to erase flash\n", __func__);
+		return MFC_FWUP_ERR_FAIL;
 	}
 
-	/* I2C WR to prepare boot-loader write */
-	if (mfc_reg_write(charger->client, 0x3000, 0x5a) < 0) {
-		pr_err("%s: key error\n", __func__);
-		goto skip_fw_verify;
+	msleep(1000); /* erasing flash needs 200ms delay at least */
+
+#ifdef LSI_MFC_FW_BOOT_CODE_INCLUDE
+	pr_info("%s: Erase boot code (0x1F10)\n", __func__);
+	if (mfc_reg_write(charger->client, 0x1F10, 0x55) < 0) {
+		pr_err("%s: failed to erase boot code\n", __func__);
+		return MFC_FWUP_ERR_FAIL;
 	}
-
-	if (mfc_reg_write(charger->client, 0x3040, 0x11) < 0) {
-		pr_err("%s: halt M0, OTP_I2C_EN set error\n", __func__);
-		goto skip_fw_verify;
-	}
-
-	dev_err(&charger->client->dev, "%s, request_firmware\n", __func__);
-	ret = request_firmware(&charger->firm_data_bin, MFC_FLASH_FW_HEX_PATH,
-		&charger->client->dev);
-	if (ret < 0) {
-		dev_err(&charger->client->dev, "%s: failed to request firmware %s (%d)\n",
-			__func__, MFC_FLASH_FW_HEX_PATH, ret);
-		goto skip_fw_verify;
-	}
-	ret = 1;
-	wake_lock(&charger->wpc_update_lock);
-	for (i = 0; i < charger->firm_data_bin->size; i += sendsz) {
-		block_len = (i + sendsz) > charger->firm_data_bin->size ? charger->firm_data_bin->size - i : sendsz;
-		block_addr = 0x8000 + i;
-
-		if (mfc_reg_multi_read(charger->client, block_addr, rdata, block_len) < 0) {
-			pr_err("%s, read failed\n", __func__);
-			ret = 0;
-			break;
-		}
-		if (datacmp(charger->firm_data_bin->data + i, rdata, block_len)) {
-			pr_err("%s, verify data is not matched. block_len(%d), block_addr(%d)\n",
-				__func__, block_len, block_addr);
-			ret = -1;
-			break;
-		}
-	}
-	release_firmware(charger->firm_data_bin);
-	wake_unlock(&charger->wpc_update_lock);
-
-skip_fw_verify:
-	mutex_unlock(&charger->fw_lock);
-	return ret;
-}
-
-bool WriteWordToMtp(struct mfc_charger_data *charger, u16 StartAddr, u32 data)
-{
-	int j, cnt;
-	u8 sBuf[16] = {0,};
-	u16 CheckSum = StartAddr;
-	u16 CodeLength = 4;
-	//*(u32*)&sBuf[8] = data;
-	sBuf[8] = (u8)(data >> 0);
-	sBuf[9] = (u8)(data >> 8);
-	sBuf[10] = (u8)(data >> 16);
-	sBuf[11] = (u8)(data >> 24);
-
-	pr_info("%s: changed sBuf codes\n", __func__);
-	for (j = 3; j >= 0; j--)
-		CheckSum += sBuf[j + 8];	// add the non zero values
-	CheckSum += CodeLength;			// finish calculation of the check sum
-	//*(u16*)&sBuf[2] = StartAddr;
-	//*(u16*)&sBuf[4] = CodeLength;
-	//*(u16*)&sBuf[6] = CheckSum;
-	sBuf[2] = (u8)(StartAddr >> 0);
-	sBuf[3] = (u8)(StartAddr >> 8);
-	sBuf[4] = (u8)(CodeLength >> 0);
-	sBuf[5] = (u8)(CodeLength >> 8);
-	sBuf[6] = (u8)(CheckSum >> 0);
-	sBuf[7] = (u8)(CheckSum >> 8);
-
-	if (mfc_reg_multi_write(charger->client, 0x400, sBuf, 4 + 8) < 0)
-	{
-		pr_err("ERROR: on writing to OTP buffer");
-		return false;
-	}
-
-	sBuf[0] = 0x01;
-	if (mfc_reg_write(charger->client, 0x400, sBuf[0]) < 0)
-	{
-		pr_err("ERROR: on OTP buffer validation");
-		return false;
-	}
-
-	cnt = 0;
-	do {
-		msleep(20);
-		if (mfc_reg_read(charger->client, 0x400, sBuf) < 0)
-		{
-			pr_err("ERROR: on reading OTP buffer status(%d)", cnt);
-			return false;
-		}
-
-		if (cnt > 1000) {
-			pr_err("ERROR: time out on buffer program to OTP");
-			break;
-		}
-		cnt++;
-	} while ((sBuf[0]&1) != 0);
-
-	if (sBuf[0] != 2) // not OK
-	{
-		pr_err("ERROR: buffer write to OTP returned status %d ",sBuf[0]);
-		return false;
-	}
-	return true;
-}
-
-int mfc_check_idt_info_page(struct mfc_charger_data *charger)
-{
-	u8 i = 0;
-	u8 rdata = 0;
-	u16 BaseAddr = 0x4000;
-	u16 infoPageAddr = BaseAddr + 0x8000;	// Compensate for 0x8000 offset when reading MTP
-	u8 numBytesToCheck = 8;
-
-	/*
-	3.1.	Configure clocks and timing
-		3.1.1.	Write 0x00 to address 0x3004
-		3.1.2.	Write 0x09 to address 0x3008
-		3.1.3.	Write 0x05 to address 0x300c
-		3.1.4.	Write 0x1D to address 0x300d
-	*/
-	if (mfc_reg_write(charger->client, 0x3004, 0x00) < 0) {
-		pr_err("%s: Configure clocks and timing error (1)\n", __func__);
-		return MFC_FWUP_ERR_CLK_TIMING_ERR1;
-	}
-	if (mfc_reg_write(charger->client, 0x3008, 0x09) < 0) {
-		pr_err("%s: Configure clocks and timing error (2)\n", __func__);
-		return MFC_FWUP_ERR_CLK_TIMING_ERR2;
-	}
-	if (mfc_reg_write(charger->client, 0x300c, 0x05) < 0) {
-		pr_err("%s: Configure clocks and timing error (3)\n", __func__);
-		return MFC_FWUP_ERR_CLK_TIMING_ERR3;
-	}
-	if (mfc_reg_write(charger->client, 0x300d, 0x1D) < 0) {
-		pr_err("%s: Configure clocks and timing error (4)\n", __func__);
-		return MFC_FWUP_ERR_CLK_TIMING_ERR4;
-	}
-
-	/*
-	3.2.	Pause the processor and enable MTP access via I2C
-		3.2.1.	Write 0x11 to address 0x3040
-	*/
-	if (mfc_reg_write(charger->client, 0x3040, 0x11) < 0) {
-		pr_err("%s: Pause the processor and enable MTP access via I2C error\n", __func__);
-		return MFC_FWUP_ERR_INFO_PAGE_EMPTY;
-	}
-
-	/*
-	3.3.	Begin reading MTP 
-		3.3.1.	Read 8 bytes starting from 0xc000  and if all bytes == 0xFF then exit
-	*/
-	for (i = 0; i < numBytesToCheck; i++)
-	{
-		if (mfc_reg_read(charger->client, infoPageAddr, &rdata) < 0)
-			return MFC_FWUP_ERR_INFO_PAGE_EMPTY;
-
-		if (rdata != 0xFF) {
-			pr_info("%s: Info page is programmed, f/w update allowed\n", __func__);
-			return MFC_FWUP_ERR_SUCCEEDED;
-		}
-		// All bytes have data other than 0xFF
-		if (i == (numBytesToCheck - 1)) {
-			pr_info("%s: Info page is empty\n", __func__);
-			return MFC_FWUP_ERR_INFO_PAGE_EMPTY;
-		}
-	}
-	return MFC_FWUP_ERR_INFO_PAGE_EMPTY;
-}
-
-/* Load MTP utility in RAM */
-static int LoadMTPVerifierInRAM(struct mfc_charger_data *charger, u16 addr)
-{
-	int i, size;
-	void* buf = NULL;
-	int numOfByteToRead; // set the number of bytes to read
-
-	buf = kzalloc(sizeof(MTPVerifier9320), GFP_KERNEL);
-	if (!buf) {
-		pr_err("%s - kzalloc failed\n", __func__);
-		return 0;
-	}
-	size = sizeof(MTPVerifier9320);
-
-	if (mfc_reg_multi_write_verify(charger->client, addr, MTPVerifier9320, size) < 0) {
-		pr_err("%s,fail", __func__);
-	}
-	i = 0;
-	while(size > 0) {
-		/* It reads 16 bytes in normal cases,
-		when remaining size is less than 16, set it to the small size.
-		This is to deal with the last 4 bytes in updated MTPVerifier9320[] */
-		numOfByteToRead = size >= 16 ? 16 : size;
-		if (mfc_reg_multi_read(charger->client, addr+i, buf+i, numOfByteToRead) < 0) {
-			pr_err("%s, read failed(%d)", __func__, addr+i);
-			kfree(buf);
-			return MFC_VERIFY_ERR_ADDR_READ_FAIL;
-		}
-		i += 16;
-		size -= 16;
-	}
-
-	size = sizeof(MTPVerifier9320); // 'size' is changed, get MTPVerifier9320 size again
-	if (datacmp(buf, MTPVerifier9320, size)) {
-		pr_err("%s, data is not matched\n", __func__);
-		kfree(buf);
-		return MFC_VERIFY_ERR_DATA_NOT_MATCH;
-	}
-
-	kfree(buf);
-	return MFC_FWUP_ERR_SUCCEEDED;
-}
-
-/*Setup MTP to verify */
-static int VerifyMTPwRAM_IDT(struct mfc_charger_data *charger, unsigned short start_addr,
-							unsigned short size, unsigned short checksum)
-{
-	u8 sBuf[8];
-	u16 mtp_verify_cnt = 0;
-	int ret;
-
-	if (charger->pdata->wpc_en >= 0)
-		gpio_direction_output(charger->pdata->wpc_en, 1);
-	mfc_uno_on(charger, false);
-	msleep(1000);
-	mfc_uno_on(charger, true);
-	if (charger->pdata->wpc_en >= 0)
-		gpio_direction_output(charger->pdata->wpc_en, 0);
 	msleep(300);
+#endif
+	pr_info("%s: write fwimg by 32 bytes \n", __func__);
 
-	pr_info("%s %s: start\n", MFC_FW_MSG, __func__);
+#ifdef LSI_MFC_FW_BOOT_CODE_INCLUDE
+	start_addr = 0x00;
+#else 
+	start_addr = LSI_MFC_FW_FLASH_START_ADDR;
+#endif
+	chksum = 0;
+	for (i = start_addr; i < size; i++)
+		chksum += srcData[i];
 
-	if (mfc_reg_write(charger->client, 0x3000, 0x5a) < 0) {
-		pr_err("%s %s: write key error\n", MFC_FW_MSG, __func__);
-		return MFC_VERIFY_ERR_WIRTE_KEY_ERR;		// write key
-	}
-
-	msleep(10);
-	if (mfc_reg_write(charger->client, 0x3040, 0x10) < 0) {
-		pr_err("%s %s: halt M0 error\n", MFC_FW_MSG, __func__);
-		return MFC_VERIFY_ERR_HALT_M0_ERR;		// halt M0
-	}
-
-	msleep(10);
-	ret = LoadMTPVerifierInRAM(charger, 0x800);
-	if (ret != MFC_FWUP_ERR_SUCCEEDED){
-		pr_err("%s %s: LoadMTPVerifierInRAM error\n", MFC_FW_MSG, __func__);
-		return ret;		// make sure load address and 1KB size are OK
-	}
-
-	msleep(10);
-	// Clear MTP program status byte
-	if (mfc_reg_write(charger->client, 0x0400, 0x00) < 0) {
-			pr_err("%s %s: clear MTP verifier status byte error\n", MFC_FW_MSG, __func__);
-		   return MFC_VERIFY_ERR_CLR_MTP_STATUS_BYTE;
-	}
-
-	msleep(10);
-	if (mfc_reg_write(charger->client, 0x3048, 0xd0) < 0) {
-		pr_err("%s %s: map RAM to MTP error\n", MFC_FW_MSG, __func__);
-		return MFC_VERIFY_ERR_MAP_RAM_TO_OTP_ERR;		// map RAM to MTP
-	}
-
-	// Check Key lock state
-	mfc_reg_write(charger->client, 0x3040, 0x80); //M0 RESET : P9320 will not acknowledge for this transaction !!
-	msleep(100);
-
-	if (mfc_reg_write(charger->client, 0x3000, 0x5A) < 0) {	//unlock system registers
-		pr_err("%s %s: unlock system registers error\n", MFC_FW_MSG, __func__);
-		return MFC_VERIFY_ERR_UNLOCK_SYS_REG_ERR;		// unlock system registers
-	}
-
-	if (mfc_reg_write(charger->client, 0x300D, 0x04) < 0) {	//set LDO clock to 2MHz
-		pr_err("%s %s: set LDO clock to 2MHz error\n", MFC_FW_MSG, __func__);
-		return MFC_VERIFY_ERR_LDO_CLK_2MHZ_ERR;		// set LDO to 2MHz
-	}
-
-	if (mfc_reg_write(charger->client, 0x3010, 0x6C) < 0) {	//set LDO output voltage as 5.5V
-		pr_err("%s %s: set LDO output voltage as 5.5V error\n", MFC_FW_MSG, __func__);
-		return MFC_VERIFY_ERR_LDO_OUTPUT_5_5V_ERR;		// set LDO voltage to 5.5V
-	}
-
-	if (mfc_reg_write(charger->client, 0x301C, 0x09) < 0) {	//enable LDO
-		pr_err("%s %s: enable LDO error\n", MFC_FW_MSG, __func__);
-		return MFC_VERIFY_ERR_ENABLE_LDO_ERR;		// enable LDO
-	}
-
-	sBuf[0] = 0;
-	sBuf[1] = 0;
-	sBuf[2] = (unsigned char)(start_addr >> 0);
-	sBuf[3] = (unsigned char)(start_addr >> 8);
-	sBuf[4] = (unsigned char)(size >> 0);
-	sBuf[5] = (unsigned char)(size >> 8);
-	sBuf[6] = (unsigned char)(checksum >> 0);
-	sBuf[7] = (unsigned char)(checksum >> 8);
-
-	msleep(10);
-	if (mfc_reg_multi_write(charger->client, 0x400, sBuf, sizeof(sBuf)) < 0)
+	for (addr = start_addr; addr < size; addr += 32) // program pages of 32bytes
 	{
-		pr_err("%s ERROR: on writing to MTP verification buffer", MFC_FW_MSG);
-		return MFC_VERIFY_ERR_WRITING_TO_MTP_VERIFY_BUFFER;
-	}
-
-	// Start MTP verification
-	msleep(10);
-	if (mfc_reg_write(charger->client, 0x400, 0x11) < 0) {
-		pr_err("%s %s: Start MTP verification error\n", MFC_FW_MSG, __func__);
-		return MFC_VERIFY_ERR_START_MTP_VERIFY_ERR;		// map RAM to MTP
-	}
-
-	do
-	{
-		msleep(20);
-		if (mfc_reg_read(charger->client, 0x401, sBuf) < 0)
-		{
-			pr_err("%s ERROR: on reading MTP verification status(%d)", MFC_FW_MSG, mtp_verify_cnt);
-			return MFC_VERIFY_ERR_READING_MTP_VERIFY_STATUS;
-		}
-		if (mtp_verify_cnt > 1000) {
-			pr_err("%s ERROR: time out on buffer verification program to MTP", MFC_FW_MSG);
-			break;
-		}
-		mtp_verify_cnt++;
-	} while ((sBuf[0] & 1) != 0);
-
-	msleep(10);
-	if (mfc_reg_read(charger->client, 0x401, sBuf) < 0)
-	{
-		pr_err("%s ERROR: on reading MTP verification pass/fail", MFC_FW_MSG);
-		return false;
-	}
-
-	if (sBuf[0] != 2) // not OK
-	{
-		if (sBuf[0] == 1) {
-			ret = MFC_VERIFY_ERR_CRC_BUSY;
-			pr_err("%s: CRC BUSY ERROR\n", MFC_FW_MSG);
-		} else if (sBuf[0] == 4) {
-			ret = MFC_VERIFY_ERR_CRC_ERROR;
-			pr_err("%s: CRC ERROR\n", MFC_FW_MSG);
-		} else {
-			ret = MFC_VERIFY_ERR_UNKOWN_ERR;
-			pr_err("%s UNKNOWN ERR\n", MFC_FW_MSG);
-		}
-		pr_err("%s ERROR: buffer write to OTP returned status %d in sector 0x%x ",
-			MFC_FW_MSG, sBuf[0], mtp_verify_cnt);
-		return ret;
-	}
-
-	msleep(10);
-
-	pr_err("MTP verification finished in");
-	return MFC_FWUP_ERR_SUCCEEDED;
-}
-
-/* Load MTP Repair Utility in RAM */
-static int LoadMTPRepairInRAM(struct mfc_charger_data *charger, u16 addr)
-{
-	int i, size;
-	void* buf = NULL;
-	int numOfByteToRead;                            // set the number of bytes to read
-
-	buf = kzalloc(sizeof(MTPRepair9320), GFP_KERNEL);
-	if (!buf) {
-		pr_err("%s - kzalloc failed\n", __func__);
-		return 0;
-	}
-	size = sizeof(MTPRepair9320);
-
-	if (mfc_reg_multi_write_verify(charger->client, addr, MTPRepair9320, size) < 0) {
-		pr_err("%s,fail", __func__);
-	}
-	i = 0;
-	while (size > 0) {
-		numOfByteToRead = size >= 16 ? 16 : size;   // It reads 16 bytes in normal cases, when remaining
-													// size is less than 16, set it to the small
-													// size. This is to deal with the last 4 bytes
-													// in updated MTPVerifier9320[]
-		if (mfc_reg_multi_read(charger->client, addr + i, buf + i, numOfByteToRead) < 0) {
-			pr_err("%s, read failed(%d)", __func__, addr + i);
-			kfree(buf);
-			return 0;
-		}
-		i += 16;
-		size -= 16;
-	}
-
-	size = sizeof(MTPRepair9320);                // 'size' is changed, get MTPVerifier9320 size again
-	if (datacmp(buf, MTPRepair9320, size)) {
-		pr_err("%s, data is not matched\n", __func__);
-		kfree(buf);
-		return 0;
-	}
-
-	kfree(buf);
-	return 1;
-}
-
-
-/*Setup MTP to verify */
-static int RepairMTPwRAM_IDT(struct mfc_charger_data *charger)
-{
-	u16 mtp_repair_cnt = 0;
-	u8 status;
-
-	if (mfc_reg_write(charger->client, 0x3040, 0x10) < 0) {
-		pr_err("%s: halt M0 error\n", __func__);
-		return MFC_REPAIR_ERR_HALT_M0_ERR;		// halt M0
-	}
-
-	msleep(10);
-	if (!LoadMTPRepairInRAM(charger, 0x800)) {
-		pr_err("%s: LoadMTPRepairInRAM error\n", __func__);
-		return MFC_REPAIR_ERR_MTP_REPAIR_IN_RAM;	
-	}
-
-	msleep(10);
-	// Clear MTP program status byte
-	if (mfc_reg_write(charger->client, 0x0400, 0x00) < 0) {
-		pr_err("%s: clear MTP repair program status byte error\n", __func__);
-		return MFC_REPAIR_ERR_CLR_MTP_STATUS_BYTE;
-	}
-
-	// Check Key lock state
-	mfc_reg_write(charger->client, 0x3040, 0x80); //M0 RESET : P9320 will not acknowledge for this transaction !!
-	msleep(100);
-
-	// Start MTP repair
-	msleep(10);
-	if (mfc_reg_write(charger->client, 0x400, 0x1) < 0) {
-		pr_err("%s: Start MTP Repair error\n", __func__);
-		return MFC_REPAIR_ERR_START_MTP_REPAIR_ERR;		// map RAM to MTP
-	}
-	do
-	{
-		msleep(20);
-		if (mfc_reg_read(charger->client, 0x400, &status) < 0)
-		{
-			pr_err("ERROR: on reading MTP repair program status(%d)", mtp_repair_cnt);
-			return MFC_REPAIR_ERR_READING_MTP_REPAIR_STATUS;
-		}
-		if (mtp_repair_cnt > 1000) {
-			pr_err("ERROR: time out on MTP repair program");
-			break;
-		}
-		mtp_repair_cnt++;
-	} while ((status & 1) != 0);  // bit 0 will be cleared once the program is finished
-
-	msleep(10);
-	if (mfc_reg_read(charger->client, 0x400, &status) < 0)
-	{
-		pr_err("ERROR: on reading MTP repair status pass/fail");
-		return MFC_REPAIR_ERR_READING_MTP_REPAIR_PASS_FAIL;
-	}
-
-	if (status != 2) // not OK
-	{
-		if (status == 64)
-			pr_err("MTP REPAIR ERROR\n");
+		temp = addr & 0xff;
+		addr_l = (u8)temp;
+		temp = ((addr & 0xff00) >> 8);
+		addr_h = (u8)temp;
+		if (size - addr >= 32)
+			mfc_write_fw_flash_LSI(charger, addr_l, addr_h, srcData + addr, 32);
 		else
-			pr_err("UNKNOWN ERR\n");
-		pr_err("ERROR: buffer write to MTP returned status %d in sector 0x%x ", status, mtp_repair_cnt);
-		return MFC_REPAIR_ERR_BUFFER_WRITE_IN_SECTOR;
+			mfc_write_fw_flash_LSI(charger, addr_l, addr_h, srcData + addr, size - addr);
 	}
+
+	pr_info("%s: write fw length --------------------\n", __func__);
+	wdata[0] = (u8)(size & 0x00FF);
+	wdata[1] = (u8)((size>>8) & 0x00FF);
+	wdata[2] = 0x00;
+	wdata[3] = 0x00;
+	mfc_write_fw_flash_LSI(charger, 0xf4, 0x7e, wdata, 4);
+
+	pr_info("%s: write fw checksum --------------------\n", __func__);
+	chksum = -chksum;
+	wdata[0] = chksum; /* checksum */
+	wdata[1] = 0x00;
+	wdata[2] = 0x00;
+	wdata[3] = 0x00;
+	mfc_write_fw_flash_LSI(charger, 0xf8, 0x7e, wdata, 4);
+
+	pr_info("%s: write flash done flag --------------------*\n", __func__);
+	wdata[0] = 0x01;
+	wdata[1] = 0x00;
+	wdata[2] = 0x00;
+	wdata[3] = 0x00;
+	mfc_write_fw_flash_LSI(charger, 0xfc, 0x7e, wdata, 4);
 
 	msleep(10);
-
-	pr_err("MTP Repair finished");
-	return MFC_FWUP_ERR_SUCCEEDED;
-}
-
-static int PgmOTPwRAM_IDT(struct mfc_charger_data *charger, unsigned short OtpAddr,
-					  const u8 * srcData, int srcOffs, int size, bool repairEn)
-{
-	int i, cnt, ret;
-	u8 fw_major[2] = {0,};
-	u8 fw_minor[2] = {0,};
-	u16 BaseAddr = 0, Offset = 0;
-	u32 fw_ver = 0;
-
-	pr_info("%s %s: start\n", MFC_FW_MSG, __func__);
-
-	msleep(10);
-	if (mfc_reg_write(charger->client, 0x3000, 0x5a) < 0) {
-		pr_err("%s: write key error\n", __func__);
-		return MFC_FWUP_ERR_WIRTE_KEY_ERR;		// write key
+	pr_info("%s: Enter the normal mode\n", __func__);
+	if (mfc_reg_write(charger->client, 0x1F10, 0x20) < 0) {
+		pr_err("%s: failed to enter the normal mode\n", __func__);
+		return MFC_FWUP_ERR_FAIL;
 	}
 
-	ret = mfc_check_idt_info_page(charger);
-	if (ret != MFC_FWUP_ERR_SUCCEEDED) {
-		pr_info("%s: f/w update NOT allowed, info page is empty!!!\n", __func__);
-		return ret;
+	for( i=0; i<retry; i++) {
+		msleep(10);
+		ret = MFC_FWUP_ERR_SUCCEEDED;
+
+		mfc_reg_read(charger->client, MFC_FW_MAJOR_REV_L_REG, &fw_ver[0]);
+		mfc_reg_read(charger->client, MFC_FW_MAJOR_REV_H_REG, &fw_ver[1]);
+		pr_info("%s NOW rx major firmware version 0x%x\n",
+			__func__, fw_ver[0] | (fw_ver[1] << 8));
+		
+		mfc_reg_read(charger->client, MFC_FW_MINOR_REV_L_REG, &fw_ver[2]);
+		mfc_reg_read(charger->client, MFC_FW_MINOR_REV_H_REG, &fw_ver[3]);
+		pr_info("%s NOW rx minor firmware version 0x%x\n",
+			__func__, fw_ver[2] | (fw_ver[3] << 8));
+
+		for (j = 0; j < 4; j++)
+			if (fw_ver[j] != fw_ver_bin[j])
+				ret = MFC_FWUP_ERR_COMMON_FAIL;
+
+		if( ret != MFC_FWUP_ERR_COMMON_FAIL)
+			break;
 	}
 
-	msleep(10);
-	if (mfc_reg_write(charger->client, 0x3040, 0x10) < 0) {
-		pr_err("%s: halt M0 error\n", __func__);
-		return MFC_FWUP_ERR_HALT_M0_ERR;		// halt M0
-	}
-	msleep(10);
-	ret = LoadOTPLoaderInRAM(charger, 0x0800);
-	if (ret != MFC_FWUP_ERR_SUCCEEDED){
-		pr_err("%s: LoadOTPLoaderInRAM error\n", __func__);
-		return ret;		// make sure load address and 1KB size are OK
-	}
-	msleep(10);
-
-	// Clear MTP program status byte
-	if (mfc_reg_write(charger->client, 0x0400, 0x00) < 0) {
-			pr_err("%s: clear MTP programming status byte error\n", __func__);
-		   return MFC_FWUP_ERR_CLR_MTP_STATUS_BYTE;
-	}
-
-	if (mfc_reg_write(charger->client, 0x3048, 0xD0) < 0) {
-		pr_err("%s: map RAM to OTP error\n", __func__);
-		return MFC_FWUP_ERR_MAP_RAM_TO_OTP_ERR;		// map RAM to OTP
-	}
-
-	// Check Key lock state
-	mfc_reg_write(charger->client, 0x3040, 0x80); //M0 RESET : P9320 will not acknowledge for this transaction !!
-	msleep(100);
-
-	Offset = MFC_FW_BIN_VERSION_ADDR % 128;
-	BaseAddr = MFC_FW_BIN_VERSION_ADDR - Offset;
-	pr_info("%s: %x, %x\n", __func__, BaseAddr, Offset);
-
-	// Limit programming size to 16KB
-	size = ((size > MTP_MAX_PROGRAM_SIZE)? MTP_MAX_PROGRAM_SIZE : size);
-	pr_info("%s: start to write f/w bin to mtp\n", __func__);
-	for (i = 0; i < size; i += 128)	// program pages of 128 bytes
-	{
-		u8 sBuf[144] = {0,};	// align size in 16 bytes boundary. may not be important for SS
-		u16 StartAddr = (u16)i;
-		u16 CheckSum = StartAddr;
-		u16 CodeLength = 128;
-		int j;
-		memcpy(sBuf + 8, srcData + i + srcOffs, 128);
-
-		if (i == BaseAddr) { // the FW rev address for rev 6 is 0x167C. 0x1280 is the half page base address.
-			//*(u32*)&sBuf[8 + 0x28] = 0;
-			fw_major[0] = sBuf[Offset+8];
-			fw_major[1] = sBuf[Offset+8+1];
-			fw_minor[0] = sBuf[Offset+8+2];
-			fw_minor[1] = sBuf[Offset+8+3];
-			sBuf[Offset+8] = 0;
-			sBuf[Offset+8+1] = 0;
-			sBuf[Offset+8+2] = 0;
-			sBuf[Offset+8+3] = 0;
-		}
-
-		j = size - i;	// calculate how many bytes need to be programmed in the current run and round up to 16
-
-		if (j < 128)
-		{
-			j = ((j + 15) / 16) * 16;
-			CodeLength = (u16)j;
-		}
-		else
-		{
-			j = 128;
-		}
-		j -= 1;	// compensate for index
-
-		for (; j >= 0; j--)
-			CheckSum += sBuf[j+8];	// add the non zero values
-		CheckSum += CodeLength;		// finish calculation of the check sum
-		memcpy(sBuf+2, &StartAddr, 2);
-		memcpy(sBuf+4, &CodeLength, 2);
-		memcpy(sBuf+6, &CheckSum, 2);
-
-		// FOR REFERENCE HERE IS THE DATA STRUCTURE
-		//typedef struct {
-		// 		   u16 Status;
-		// 		   u16 StartAddr;
-		// 		   u16 CodeLength;
-		// 		   u16 DataChksum;
-		// 		   u8  DataBuf[128];
-		//}  P9320PgmStrType;	 // the structure is located at address 0x400
-
-		// TODO sBuf[0] = 0x00; // done during initialization.
-
-		if (mfc_reg_multi_write(charger->client, 0x400, sBuf, ((CodeLength+8+15)/16)*16) < 0)
-		{	// TODO the write size is aligned to 16 bytes. SS may not need to do this.
-			pr_err("ERROR: on writing to OTP buffer");
-			return MFC_FWUP_ERR_WRITING_TO_OTP_BUFFER;
-		}
-		sBuf[0] = 0x01;	// TODO write 0x11 if Vrect is powered from 5V
-			//write 0x31 if Vrect is powered from 8.2V
-			//write 0x01 if Vrect is 5V and there is a problem
-
-		if (mfc_reg_write(charger->client, 0x400, sBuf[0]) < 0)
-		{
-			pr_err("ERROR: on OTP buffer validation");
-			return MFC_FWUP_ERR_OTF_BUFFER_VALIDATION;
-		}
-		cnt = 0;
-		do
-		{
-			msleep(20);
-			if (mfc_reg_read(charger->client, 0x400, sBuf) < 0)
-			{
-				pr_err("ERROR: on reading OTP buffer status(%d)", cnt);
-				return MFC_FWUP_ERR_READING_OTP_BUFFER_STATUS;
-			}
-			if (cnt > 1000) {
-				pr_err("ERROR: time out on buffer program to OTP");
-				break;
-			}
-			cnt++;
-		} while ((sBuf[0]&1) != 0);
-
-		if (sBuf[0] != 2) // not OK
-		{
-			if (sBuf[0] == 4) {
-				pr_err("WRITE ERR\n");
-				ret = MFC_FWUP_ERR_MTP_WRITE_ERR;
-			} else if (sBuf[0] == 8) {
-				pr_err("CHECKSUM ERR\n");
-				ret = MFC_FWUP_ERR_PKT_CHECKSUM_ERR;
-			} else {
-				pr_err("UNKNOWN ERR\n");
-				ret = MFC_FWUP_ERR_UNKNOWN_ERR;
-			}
-			pr_err("ERROR: buffer write to OTP returned status %d in sector 0x%x ",sBuf[0], i);
-			return ret;
-		}
-	}
-
-	if (charger->fw_cmd == SEC_WIRELESS_RX_SDCARD_MODE ||
-		charger->fw_cmd == SEC_WIRELESS_RX_SPU_MODE) {
-		fw_ver = ((fw_minor[1] << 24) | (fw_minor[0] << 16) |
-			(fw_major[1] << 8) | (fw_major[0] << 0));
-		pr_info("%s: write current f/w rev (0x%x) in sdcard\n", __func__, fw_ver);
-		if (!WriteWordToMtp(charger, MFC_FW_BIN_VERSION_ADDR, fw_ver)) {
-			  pr_err("ERROR: on writing FW rev to MTP\n");
-			  return MFC_FWUP_ERR_WRITING_FW_VERION;
-		}
-	} else {
-		pr_info("%s: write current f/w rev (0x%x) in binary\n", __func__, MFC_FW_BIN_FULL_VERSION);
-		if (!WriteWordToMtp(charger, MFC_FW_BIN_VERSION_ADDR, MFC_FW_BIN_FULL_VERSION)) {
-			  pr_err("ERROR: on writing FW rev to MTP\n");
-			  return MFC_FWUP_ERR_WRITING_FW_VERION;
-		}
-	}
-
-	// run repair utility if repair is enabled
-	if (repairEn) {
-		ret = RepairMTPwRAM_IDT(charger);
-		if(ret != MFC_FWUP_ERR_SUCCEEDED) {
-			pr_err("ERROR: on repairing MTP\n");
-			return ret;
-		}
-	}
-
-	if (repairEn)
-		pr_err("MTP Programming with repair finished in");
-	else
-		pr_err("MTP Programming finished in");
-
-	pr_info("%s-------------------------------------------------\n", __func__);
-	return MFC_FWUP_ERR_SUCCEEDED;
+	return ret;
 }
 
 static void mfc_reset_rx_power(struct mfc_charger_data *charger, u8 rx_power)
@@ -2485,24 +1923,11 @@ static void mfc_wpc_rx_power_work(struct work_struct *work)
 	psy_do_property("wireless", set, POWER_SUPPLY_PROP_WIRELESS_RX_POWER, value);
 }
 
-static void mfc_wpc_cm_fet_work(struct work_struct *work)
-{
-	struct mfc_charger_data *charger =
-		container_of(work, struct mfc_charger_data, wpc_cm_fet_work.work);
-	u8 tmp = 0;
-
-	/* disable all CM FETs for MST operation */
-	mfc_reg_write(charger->client, MFC_RX_COMM_MOD_FET_REG, 0xf0);
-	mfc_reg_read(charger->client, MFC_RX_COMM_MOD_FET_REG, &tmp);
-	pr_info("%s: disable CM FET (0x%x)\n", __func__, tmp);
-}
-
 static void mfc_wpc_afc_vout_work(struct work_struct *work)
 {
 	struct mfc_charger_data *charger =
 		container_of(work, struct mfc_charger_data, wpc_afc_vout_work.work);
 	union power_supply_propval value = {0, };
-	u8 cmd = 0;
 
 	pr_info("%s start, current cable(%d)\n", __func__, charger->pdata->cable_type);
 
@@ -2549,15 +1974,6 @@ static void mfc_wpc_afc_vout_work(struct work_struct *work)
 	charger->is_afc_tx = true;
 	pr_info("%s: is_afc_tx = %d vout read = %d\n",
 		__func__, charger->is_afc_tx, mfc_get_adc(charger, MFC_ADC_VOUT));
-
-	/* use all CM FETs for 10V wireless charging */
-#if defined(CONFIG_SEC_BLOOMQ_PROJECT)
-	if (charger->pdata->cable_type == SEC_WIRELESS_PAD_WPC_HV_20)
-#endif
-	mfc_reg_write(charger->client, MFC_RX_COMM_MOD_FET_REG, 0x00);
-
-	mfc_reg_read(charger->client, MFC_RX_COMM_MOD_FET_REG, &cmd);
-	pr_info("%s: CM FET setting(0x%x) \n", __func__, cmd);
 
 	pr_info("%s: check state(Vmode:%d, Vstatus:%d, Otg:%d)\n", __func__,
 		charger->vout_mode, charger->pdata->vout_status, charger->is_otg_on);
@@ -2609,39 +2025,40 @@ static void mfc_wpc_fw_update_work(struct work_struct *work)
 	case SEC_WIRELESS_RX_SPU_MODE:
 	case SEC_WIRELESS_RX_SDCARD_MODE:
 		mfc_uno_on(charger, true);
+		is_changed = true;
 		msleep(200);
 		if (mfc_get_chip_id(charger) < 0 ||
-			charger->chip_id != MFC_CHIP_IDT) {
+			charger->chip_id != MFC_CHIP_LSI) {
 			pr_info("%s: current IC's chip_id(0x%x) is not matching to driver's chip_id(0x%x)\n",
-				__func__, charger->chip_id, MFC_CHIP_IDT);
+				__func__, charger->chip_id, MFC_CHIP_LSI);
 			break;
 		}
 		charger->pdata->otp_firmware_result = MFC_FWUP_ERR_RUNNING;
-		is_changed = true;
 		disable_irq(charger->pdata->irq_wpc_int);
 		disable_irq(charger->pdata->irq_wpc_det);
-	
-		repairEn = false;
+		if (charger->pdata->irq_wpc_pdrc)
+			disable_irq(charger->pdata->irq_wpc_pdrc);
 #if defined(CONFIG_WIRELESS_IC_PARAM)
-		mfc_set_wireless_param(MFC_CHIP_ID_P9320, 0);
+		mfc_set_wireless_param(MFC_CHIP_ID_S2MIW04, 0);
 #endif
-		ret = PgmOTPwRAM_IDT(charger, 0, charger->fw_img, 0, charger->fw_size, repairEn);
+		ret = PgmOTPwRAM_LSI(charger, 0, charger->fw_img, 0, charger->fw_size);
+
 		charger->pdata->otp_firmware_ver = mfc_get_firmware_version(charger, MFC_RX_FIRMWARE);
 		charger->pdata->wc_ic_rev = mfc_get_ic_revision(charger, MFC_IC_REVISION);
 
 		enable_irq(charger->pdata->irq_wpc_int);
 		enable_irq(charger->pdata->irq_wpc_det);
+		if (charger->pdata->irq_wpc_pdrc)
+			enable_irq(charger->pdata->irq_wpc_pdrc);
 		break;
 	case SEC_WIRELESS_RX_INIT:
 	case SEC_WIRELESS_RX_BUILT_IN_MODE:
-		pgmCnt = 0;
-		repairEn = false;
 		mfc_uno_on(charger, true);
 		msleep(200);
 		if (mfc_get_chip_id(charger) < 0 ||
-			charger->chip_id != MFC_CHIP_IDT) {
+			charger->chip_id != MFC_CHIP_LSI) {
 			pr_info("%s: current IC's chip_id(0x%x) is not matching to driver's chip_id(0x%x)\n",
-				__func__, charger->chip_id, MFC_CHIP_IDT);
+				__func__, charger->chip_id, MFC_CHIP_LSI);
 			break;
 		}
 		if (charger->fw_cmd == SEC_WIRELESS_RX_INIT) {
@@ -2663,51 +2080,26 @@ static void mfc_wpc_fw_update_work(struct work_struct *work)
 		charger->pdata->otp_firmware_result = MFC_FWUP_ERR_RUNNING;
 		is_changed = true;
 
-		disable_irq(charger->pdata->irq_wpc_int);
-		disable_irq(charger->pdata->irq_wpc_det);
 		dev_err(&charger->client->dev, "%s, request_firmware\n", __func__);
 
-		ret = request_firmware(&charger->firm_data_bin, MFC_FLASH_FW_HEX_PATH,
+		ret = request_firmware(&charger->firm_data_bin, MFC_FLASH_FW_HEX_LSI_PATH,
 			&charger->client->dev);
 		if ( ret < 0) {
-			dev_err(&charger->client->dev, "%s: failed to request firmware %s (%d)\n", __func__, MFC_FLASH_FW_HEX_PATH, ret);
+			dev_err(&charger->client->dev, "%s: failed to request firmware %s (%d)\n", __func__, MFC_FLASH_FW_HEX_LSI_PATH, ret);
 			charger->pdata->otp_firmware_result = MFC_FWUP_ERR_REQUEST_FW_BIN;
 			goto fw_err;
 		}
+		disable_irq(charger->pdata->irq_wpc_int);
+		disable_irq(charger->pdata->irq_wpc_det);
+		if (charger->pdata->irq_wpc_pdrc)
+			disable_irq(charger->pdata->irq_wpc_pdrc);
+
 		wake_lock(&charger->wpc_update_lock);
-		pr_info("%s data size = %ld, chip_id(%d)\n", __func__, charger->firm_data_bin->size, charger->chip_id);
 #if defined(CONFIG_WIRELESS_IC_PARAM)
-		mfc_set_wireless_param(MFC_CHIP_ID_P9320, 0);
+		mfc_set_wireless_param(MFC_CHIP_ID_S2MIW04, 0);
 #endif
-		do {
-			if (repairEn == true) {
-				if (charger->pdata->wpc_en >= 0)
-					gpio_direction_output(charger->pdata->wpc_en, 1);
-				mfc_uno_on(charger, false);
-				msleep(1000);
-				mfc_uno_on(charger, true);
-				if (charger->pdata->wpc_en >= 0)
-					gpio_direction_output(charger->pdata->wpc_en, 0);
-				msleep(300);
-			}
-			ret = PgmOTPwRAM_IDT(charger, 0, charger->firm_data_bin->data,
-						0, charger->firm_data_bin->size, repairEn);
-			if (ret == MFC_FWUP_ERR_SUCCEEDED) { // pass, let's begin verification
-				ret = VerifyMTPwRAM_IDT(charger, MTP_VERIFY_ADDR,
-				MTP_VERIFY_SIZE, MTP_VERIFY_CHKSUM);
-			}
-			// if download fails, enable repair
-			//repairEn = !ret;
-			if (ret != MFC_FWUP_ERR_SUCCEEDED)
-				repairEn = true;
-			else
-				repairEn = false;
-
-			pgmCnt++;
-
-			pr_info("%s %s: repairEn(%d), pgmCnt(%d), ret(%d)\n",
-					MFC_FW_MSG, __func__, repairEn, pgmCnt, ret);
-		} while ((ret != MFC_FWUP_ERR_SUCCEEDED) && (pgmCnt < MAX_MTP_PGM_CNT));
+		pr_info("%s data size = %ld\n", __func__, charger->firm_data_bin->size);
+		ret = PgmOTPwRAM_LSI(charger, 0 ,charger->firm_data_bin->data, 0, charger->firm_data_bin->size);
 
 		release_firmware(charger->firm_data_bin);
 
@@ -2740,6 +2132,8 @@ static void mfc_wpc_fw_update_work(struct work_struct *work)
 
 		enable_irq(charger->pdata->irq_wpc_int);
 		enable_irq(charger->pdata->irq_wpc_det);
+		if (charger->pdata->irq_wpc_pdrc)
+			enable_irq(charger->pdata->irq_wpc_pdrc);
 		wake_unlock(&charger->wpc_update_lock);
 		break;
 	case SEC_WIRELESS_TX_ON_MODE:
@@ -2794,36 +2188,7 @@ end_of_fw_work:
 	mfc_fw_update = false;
 }
 
-/*#if !defined(CONFIG_SEC_FACTORY)
-static void mfc_wpc_fw_booting_work(struct work_struct *work)
-{
-	struct mfc_charger_data *charger =
-		container_of(work, struct mfc_charger_data, wpc_fw_booting_work.work);
-	union power_supply_propval value = {0, };
-	int fw_version;
-
-	value.intval =
-		SEC_FUELGAUGE_CAPACITY_TYPE_SCALE;
-	psy_do_property(charger->pdata->fuelgauge_name, get,
-		POWER_SUPPLY_PROP_CAPACITY, value);
-	pr_info("%s: battery capacity (%d)\n", __func__, value.intval);
-
-	if (value.intval >= 10) {
-		mfc_uno_on(charger, true);
-		msleep(200);
-		fw_version = mfc_get_firmware_version(charger, MFC_RX_FIRMWARE);
-		pr_info("%s: fw version (0x%x)\n", __func__, fw_version);
-		if (fw_version != MFC_FW_BIN_VERSION) {
-			charger->fw_cmd = SEC_WIRELESS_RX_BUILT_IN_MODE;
-			queue_delayed_work(charger->wqueue, &charger->wpc_fw_update_work, 0);
-		} else {
-			mfc_uno_on(charger, false);
-		}
-	}
-}
-#endif*/
-
-static int mfc_chg_get_property(struct power_supply *psy,
+static int mfc_s2miw04_chg_get_property(struct power_supply *psy,
 		enum power_supply_property psp,
 		union power_supply_propval *val)
 {
@@ -2907,28 +2272,11 @@ static int mfc_chg_get_property(struct power_supply *psy,
 		} else if (val->intval == SEC_TX_FIRMWARE) {
 			val->intval = charger->tx_status;
 		} else if (val->intval == SEC_WIRELESS_OTP_FIRM_VERIFY) {
-			pr_info("%s: IDT FIRM_VERIFY\n", __func__);
-			msleep(10);
-			val->intval = mfc_firmware_verify(charger);
+			pr_info("%s: LSI FIRM_VERIFY is not implemented\n", __func__);
+			val->intval = 1;
 		} else if (val->intval == SEC_WIRELESS_MST_SWITCH_VERIFY) {
-			/* This is the WA codes that reduces VRECT invalid case. */
-			if (gpio_is_valid(charger->pdata->mst_pwr_en)) {
-				charger->mst_off_lock = 1;
-				gpio_direction_output(charger->pdata->mst_pwr_en, 1);
-				usleep_range(3600, 4000);
-				gpio_direction_output(charger->pdata->mst_pwr_en, 0);
-				msleep(50);
-				charger->mst_off_lock = 0;
-
-				gpio_direction_output(charger->pdata->mst_pwr_en, 1);
-				msleep(charger->pdata->mst_switch_delay);
-				val->intval = mfc_get_firmware_version(charger, MFC_RX_FIRMWARE);
-				pr_info("%s: check f/w revision, mst power on (0x%x)\n", __func__, val->intval);
-				gpio_direction_output(charger->pdata->mst_pwr_en, 0);
-			} else {
-				pr_info("%s: MST_SWITCH_VERIFY, invalid gpio(mst_pwr_en)\n", __func__);
-				val->intval = -1;
-			}
+			pr_info("%s: mst_pwr_en is not used\n", __func__);
+			val->intval = -1;
 		} else {
 			val->intval = -ENODATA;
 			pr_err("%s wrong mode\n", __func__);
@@ -3031,6 +2379,11 @@ static int mfc_chg_get_property(struct power_supply *psy,
 		case POWER_SUPPLY_EXT_PROP_PAD_VOLT_CTRL:
 			val->intval = charger->is_afc_tx;
 			break;
+#if defined(CONFIG_TX_GEAR_PHM_VOUT_CTRL)
+		case POWER_SUPPLY_EXT_PROP_GEAR_PHM_EVENT:
+			val->intval = charger->tx_gear_phm;
+			break;
+#endif
 		case POWER_SUPPLY_EXT_PROP_WPC_EN:
 			val->intval = gpio_get_value(charger->pdata->wpc_en);
 			break;
@@ -3038,11 +2391,6 @@ static int mfc_chg_get_property(struct power_supply *psy,
 			if (gpio_get_value(charger->pdata->wpc_en))
 				pr_info("%s: charger->wpc_en_flag(0x%x)\n", __func__, charger->wpc_en_flag);
 			break;
-#if defined(CONFIG_TX_GEAR_PHM_VOUT_CTRL)
-		case POWER_SUPPLY_EXT_PROP_GEAR_PHM_EVENT:
-			val->intval = charger->tx_gear_phm;
-			break;
-#endif
 		default:
 			return -ENODATA;
 		}
@@ -3111,27 +2459,6 @@ static void mfc_wpc_vout_mode_work(struct work_struct *work)
 	case WIRELESS_VOUT_5_5V_STEP:
 		vout_step--;
 		if (vout_step >= MFC_VOUT_5_5V) {
-			if(charger->pdata->wpc_vout_ctrl_lcd_on) {
-				psy_do_property("battery", get,
-						POWER_SUPPLY_EXT_PROP_PAD_VOLT_CTRL, value);
-				if (value.intval && charger->is_afc_tx &&
-					(charger->tx_id != TX_ID_UNKNOWN) &&
-					(charger->tx_id != TX_ID_DREAM_DOWN &&
-					charger->tx_id != TX_ID_DREAM_STAND)) {
-					if (vout_step == charger->flicker_vout_threshold) {
-						mfc_set_vout(charger, vout_step);
-						cancel_delayed_work(&charger->wpc_vout_mode_work);
-						queue_delayed_work(charger->wqueue,
-							&charger->wpc_vout_mode_work, msecs_to_jiffies(charger->flicker_delay));
-						return;
-					} else if (vout_step < charger->flicker_vout_threshold) {
-						mfc_send_command(charger, MFC_AFC_CONF_5V_TX);
-						pr_info("%s: set TX 5V because LCD ON\n", __func__);
-						charger->is_afc_tx = false;
-						charger->pad_ctrl_by_lcd = true;
-					}
-				}
-			}
 			mfc_set_vout(charger, vout_step);
 			cancel_delayed_work(&charger->wpc_vout_mode_work);
 			queue_delayed_work(charger->wqueue,
@@ -3159,7 +2486,7 @@ static void mfc_wpc_vout_mode_work(struct work_struct *work)
 	}
 #if !defined(CONFIG_SEC_FACTORY)
 	if ((is_hv_wireless_pad_type(charger->pdata->cable_type)) &&
-            (charger->pdata->vout_status <= MFC_VOUT_5_5V && (charger->is_full_status || sleep_mode))) {
+		(charger->pdata->vout_status <= MFC_VOUT_5_5V && (charger->is_full_status || sleep_mode))) {
 		mfc_send_command(charger, MFC_AFC_CONF_5V_TX);
 		pr_info("%s: set TX 5V after cs100\n", __func__);
 		charger->is_afc_tx = false;
@@ -3206,14 +2533,14 @@ static void mfc_set_tx_ping_freq_with_gear(struct mfc_charger_data *charger)
 {
 	pr_info("@Tx_Mode %s\n", __func__);
 
-	mfc_reg_write(charger->client, MFC_TX_PING_FREQ_L_REG, charger->pdata->gear_ping_freq);
+	mfc_set_tx_ping_freq(charger, charger->pdata->gear_ping_freq);
 }
 
 static void mfc_set_tx_fod_threshold_with_phone(struct mfc_charger_data *charger)
 {
 	pr_info("@Tx_Mode %s\n", __func__);
 
-	mfc_reg_write(charger->client, MFC_WPC_FOD_THRESHOLD_REG, charger->pdata->phone_fod_threshold);
+	mfc_reg_write(charger->client, MFC_TX_FOD_THRESH2_REG, charger->pdata->phone_fod_threshold);
 }
 
 static void mfc_wpc_rx_type_det_work(struct work_struct *work)
@@ -3269,19 +2596,23 @@ static void mfc_wpc_rx_type_det_work(struct work_struct *work)
 	wake_unlock(&charger->wpc_rx_det_lock);
 }
 
-static void mfc_tx_op_freq_work(struct work_struct *work)
+static void mfc_tx_duty_min_work(struct work_struct *work)
 {
 	struct mfc_charger_data *charger =
-		container_of(work, struct mfc_charger_data, wpc_tx_op_freq_work.work);
+		container_of(work, struct mfc_charger_data, wpc_tx_duty_min_work.work);
+	u8 now_duty = mfc_get_min_duty(charger);
+	
+	pr_info("%s: duty_min(0x%x), now_duty(0x%x)\n", __func__, charger->duty_min, now_duty);
 
-	pr_info("%s \n", __func__);
-
-	/* recover tx op freq */
-	mfc_set_min_duty(charger, 20);
-	pr_info("%s : tx op freq = %dKhz\n", __func__, mfc_get_adc(charger, MFC_ADC_TX_OP_FRQ));
-
-	wake_unlock(&charger->wpc_tx_opfq_lock);
-
+	if (charger->duty_min == 50) {
+		mfc_set_min_duty(charger, charger->duty_min);
+		wake_unlock(&charger->wpc_tx_duty_min_lock);
+	} else if (now_duty > 20) {
+		mfc_set_min_duty(charger, now_duty - 10);
+		queue_delayed_work(charger->wqueue, &charger->wpc_tx_duty_min_work, msecs_to_jiffies(2000));
+	} else {
+		wake_unlock(&charger->wpc_tx_duty_min_lock);
+	}
 }
 
 static void mfc_tx_min_op_freq_work(struct work_struct *work)
@@ -3323,12 +2654,8 @@ static void mfc_tx_phm_work(struct work_struct *work)
 		container_of(work, struct mfc_charger_data, wpc_tx_phm_work.work);
 
 	int cnt = 0;
-#if defined(CONFIG_TX_GEAR_PHM_VOUT_CTRL)
-	union power_supply_propval value = {0, };
-	u8 data = 0;
-#endif
 
-	/* noirq resume of devices complete after 1000 msecs */
+	/* noirq resume of devices complete after 200 msecs */
 	while (charger->is_suspend) {
 		msleep(100);
 		cnt++;
@@ -3339,69 +2666,13 @@ static void mfc_tx_phm_work(struct work_struct *work)
 	pr_info("%s \n", __func__);
 	mfc_set_cmd_l_reg(charger,MFC_CMD_TOGGLE_PHM_MASK, MFC_CMD_TOGGLE_PHM_MASK);
 
-#if defined(CONFIG_TX_GEAR_PHM_VOUT_CTRL)
-	if (charger->tx_gear_phm) {
-		charger->tx_gear_phm = 0;
-		value.intval = 0;
-		psy_do_property("wireless", set,
-			POWER_SUPPLY_EXT_PROP_GEAR_PHM_EVENT, value);
-	}
-
-	msleep(400);
-	mfc_reg_update(charger->client, MFC_INT_A_ENABLE_H_REG,
-		MFC_STAT_H_TX_CON_DISCON_MASK, MFC_STAT_H_TX_CON_DISCON_MASK);
-	mfc_reg_read(charger->client,MFC_INT_A_ENABLE_H_REG, &data);
-
-	mfc_reg_read(charger->client,MFC_STATUS_H_REG, &data);
-	pr_info("@Tx_Mode %s MFC_STATUS_H_REG(0x21)= 0x%x\n", __func__, data);
-	/* determine rx connection status with tx sharing mode */
-	if (!(data & MFC_STAT_H_TX_CON_DISCON_MASK)) {
-		if (!charger->wc_rx_connected) {
-			pr_info("@Tx_Mode %s Ignore IRQ!! already Rx disconnected!\n", __func__);
-		} else {
-			charger->wc_rx_connected = false;
-			wake_lock(&charger->wpc_rx_connection_lock);
-			queue_delayed_work(charger->wqueue,
-				&charger->wpc_rx_connection_work, 0);
-		}
-	}
-#endif
 	wake_unlock(&charger->wpc_tx_phm_lock);
-}
-
-static void mfc_cs100_work(struct work_struct *work)
-{
-	struct mfc_charger_data *charger =
-		container_of(work, struct mfc_charger_data, wpc_cs100_work.work);
-
-	pr_info("%s \n", __func__);
-	if (is_wireless_pad_type(charger->pdata->cable_type)) {
-		/* set fake FOD values before send cs100, need to tune */
-		mfc_fod_set_cs100(charger);
-	}
-	charger->pdata->cs100_status = mfc_send_cs100(charger);
-
-#if !defined(CONFIG_SEC_FACTORY)
-	if (!charger->is_full_status) {
-		charger->is_full_status = 1;
-		if (is_hv_wireless_pad_type(charger->pdata->cable_type) &&
-			(charger->tx_id != TX_ID_DREAM_STAND &&
-			charger->tx_id != TX_ID_DREAM_DOWN)) {
-			charger->vout_mode = WIRELESS_VOUT_5_5V_STEP;
-			cancel_delayed_work(&charger->wpc_vout_mode_work);
-			wake_lock(&charger->wpc_vout_mode_lock);
-			queue_delayed_work(charger->wqueue,
-				&charger->wpc_vout_mode_work, msecs_to_jiffies(250));
-		}
-	}
-#endif
-	wake_unlock(&charger->wpc_cs100_lock);
 }
 
 #if defined(CONFIG_UPDATE_BATTERY_DATA)
 static int mfc_chg_parse_dt(struct device *dev, mfc_charger_platform_data_t *pdata);
 #endif
-static int mfc_chg_set_property(struct power_supply *psy,
+static int mfc_s2miw04_chg_set_property(struct power_supply *psy,
 		enum power_supply_property psp,
 		const union power_supply_propval *val)
 {
@@ -3410,25 +2681,38 @@ static int mfc_chg_set_property(struct power_supply *psy,
 	int vout, vrect, iout, freq, tx_freq, i = 0;
 	u8 tmp = 0;
 	/* int ret; */
-	u8 fod[12] = {0, };
+	u8 fod[MFC_NUM_FOD_REG] = {0, };
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
 		if (val->intval == POWER_SUPPLY_STATUS_FULL) {
-			pr_info("%s full status\n", __func__);
-			wake_lock(&charger->wpc_cs100_lock);
-			if (charger->tx_id)
-				queue_delayed_work(charger->wqueue,
-					&charger->wpc_cs100_work, msecs_to_jiffies(0));
-			else
-				queue_delayed_work(charger->wqueue,
-					&charger->wpc_cs100_work, msecs_to_jiffies(15000));
+			pr_info("%s set cs100\n", __func__);
+			if (is_wireless_pad_type(charger->pdata->cable_type)) {
+				/* set fake FOD values before send cs100, need to tune */
+				mfc_fod_set_cs100(charger);
+			}
+			charger->pdata->cs100_status = mfc_send_cs100(charger);
+#if !defined(CONFIG_SEC_FACTORY)
+			if (!charger->is_full_status) {
+				charger->is_full_status = 1;
+				if (is_hv_wireless_pad_type(charger->pdata->cable_type) &&
+					(charger->tx_id != TX_ID_DREAM_STAND &&
+					charger->tx_id != TX_ID_DREAM_DOWN)) {
+					charger->vout_mode = WIRELESS_VOUT_5_5V_STEP;
+					cancel_delayed_work(&charger->wpc_vout_mode_work);
+					wake_lock(&charger->wpc_vout_mode_lock);
+					queue_delayed_work(charger->wqueue,
+						&charger->wpc_vout_mode_work, msecs_to_jiffies(250));
+				}
+			}
+#endif
+
 		} else if (val->intval == POWER_SUPPLY_STATUS_NOT_CHARGING) {
 			mfc_mis_align(charger);
 		} else if (val->intval == POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE) {
-			if (charger->tx_id == TX_ID_DREAM_STAND) {
+			if (charger->tx_id == TX_ID_DREAM_STAND)
 				mfc_fod_set_dream_cv(charger);
-			} else
+			else
 				mfc_fod_set_cv(charger);
 		}
 		break;
@@ -3460,14 +2744,7 @@ static int mfc_chg_set_property(struct power_supply *psy,
 		if (val->intval) {
 			charger->is_mst_on = MST_MODE_2;
 			pr_info("%s: set MST mode 2\n", __func__);
-			/* disable CM FETs to avoid MST/WPC crash situation  */
-			queue_delayed_work(charger->wqueue,
-				&charger->wpc_cm_fet_work, msecs_to_jiffies(1000));
 		} else {
-#if defined(CONFIG_MFC_LDO_COMMAND)
-			mfc_reg_write(charger->client, MFC_MST_MODE_SEL_REG, 0x00); /* Exit MST mode */
-			mfc_reg_write(charger->client, MFC_MST_LDO_CONFIG_1, 0x00); /* MST LDO config 7 */
-#endif
 			pr_info("%s: set MST mode off\n", __func__);
 			charger->is_mst_on = MST_MODE_0;
 		}
@@ -3613,9 +2890,6 @@ out:
 			val->intval == WIRELESS_VOUT_10V_STEP) {
 			if (!charger->is_full_status && !is_shutdn) {
 				if (!charger->is_afc_tx) {
-#if !defined(CONFIG_SEC_BLOOMQ_PROJECT)
-					u8 cmd = 0;
-#endif
 					pr_info("%s: need to set afc tx before vout control\n", __func__);
 
 					if (charger->pdata->cable_type == SEC_WIRELESS_PAD_WPC_HV_20)
@@ -3623,20 +2897,8 @@ out:
 					else
 						mfc_send_command(charger, MFC_AFC_CONF_10V_TX);
 					charger->is_afc_tx = true;
-
-					if (charger->pad_ctrl_by_lcd)
-						charger->pad_ctrl_by_lcd = false;
-
 					pr_info("%s: is_afc_tx = %d vout read = %d \n",
 						__func__, charger->is_afc_tx, mfc_get_adc(charger, MFC_ADC_VOUT));
-
-#if !defined(CONFIG_SEC_BLOOMQ_PROJECT)
-					/* use all CM FETs for 10V wireless charging */
-					/* used when VOUT <= 8.5V OR VOUT > 8.5V AND IOUT >= 320mA */
-					mfc_reg_write(charger->client, MFC_RX_COMM_MOD_FET_REG, 0x00);
-					mfc_reg_read(charger->client, MFC_RX_COMM_MOD_FET_REG, &cmd);
-					pr_info("%s: CM FET setting(0x%x) \n", __func__, cmd);
-#endif
 				}
 				charger->vout_mode = val->intval;
 				cancel_delayed_work(&charger->wpc_vout_mode_work);
@@ -3661,6 +2923,7 @@ out:
 			mfc_led_control(charger, MFC_LED_CONTROL_ON);
 		} else if (val->intval == WIRELESS_PAD_LED_DIMMING) {
 			pr_info("%s: led dimming\n", __func__);
+			mfc_led_control(charger, MFC_LED_CONTROL_DIMMING);
 		} else if (val->intval == WIRELESS_VRECT_ADJ_ON) {
 			pr_info("%s: vrect adjust to have big headroom(default value)\n", __func__);
 			mfc_set_vrect_adjust(charger, MFC_HEADROOM_1);
@@ -3687,10 +2950,8 @@ out:
 			mfc_set_vrect_adjust(charger, MFC_HEADROOM_5);
 		} else if (val->intval == WIRELESS_CLAMP_ENABLE) {
 			pr_info("%s: enable clamp1, clamp2 for WPC modulation\n", __func__);
-			//default enabled state. no need to config.
-			//mfc_reg_update(charger->client, MFC_RX_COMM_MOD_FET_REG, 0x00, 0x00);
 		} else if (val->intval == WIRELESS_SLEEP_MODE_ENABLE) {
-			if(is_sleep_mode_active(charger->tx_id)) {
+			if (is_sleep_mode_active(charger->tx_id)) {
 				pr_info("%s: sleep_mode enable\n", __func__);
 				msleep(500);
 				pr_info("%s: led dimming\n", __func__);
@@ -3702,7 +2963,7 @@ out:
 				pr_info("%s: sleep_mode inactive\n", __func__);
 			}
 		} else if (val->intval == WIRELESS_SLEEP_MODE_DISABLE) {
-			if(is_sleep_mode_active(charger->tx_id)) {
+			if (is_sleep_mode_active(charger->tx_id)) {
 				pr_info("%s: sleep_mode disable\n", __func__);
 				msleep(500);
 				pr_info("%s: led on\n", __func__);
@@ -3733,7 +2994,7 @@ out:
 			vout = mfc_get_adc(charger, MFC_ADC_TX_VOUT);
 			iout = mfc_get_adc(charger, MFC_ADC_TX_IOUT);
 			freq = mfc_get_adc(charger, MFC_ADC_OP_FRQ);
-			tx_freq = mfc_get_adc(charger, MFC_ADC_OP_FRQ);
+			tx_freq = mfc_get_adc(charger, MFC_ADC_TX_PING_FRQ);
 			pr_info("@Tx_Mode %s Firmware Ver = %x TX_VOUT = %dmV, TX_IOUT = %dmA, OP_FREQ = %dKHz, TX_OP_FREQ = %dKHZ, %s connected\n",
 				__func__, charger->pdata->otp_firmware_ver, vout, iout, freq, tx_freq, rx_device_type_str[charger->wc_rx_type]);
 		} else if (charger->pdata->cable_type != SEC_WIRELESS_PAD_NONE) {
@@ -3745,24 +3006,14 @@ out:
 				__func__, charger->pdata->otp_firmware_ver, vout, vrect, iout, freq,
 				charger->pdata->wc_ic_rev, charger->pdata->cable_type);
 
-#if !defined(CONFIG_SEC_BLOOMQ_PROJECT)
-			if ((vout < 6500) && (charger->pdata->capacity >= 85)) {
-				mfc_reg_read(charger->client, MFC_RX_COMM_MOD_FET_REG, &tmp);
-				if (tmp != 0x00) {
-					/* use all CM FETs for 5V wireless charging */
-					/* used when VOUT <= 8.5V OR VOUT > 8.5V AND IOUT >= 320mA */
-					mfc_reg_write(charger->client, MFC_RX_COMM_MOD_FET_REG, 0x00);
-					mfc_reg_read(charger->client, MFC_RX_COMM_MOD_FET_REG, &tmp);
-					pr_info("%s: CM FET setting(0x%x)\n", __func__, tmp);
-				}
-			}
-#endif
-
 			for (i = 0; i < MFC_NUM_FOD_REG; i++)
 				mfc_reg_read(charger->client, MFC_WPC_FOD_0A_REG+i, &fod[i]);
-			pr_info("%s: FOD(%d %d %d %d %d %d %d %d %d %d %d %d)\n", __func__,
-				fod[0], fod[1], fod[2], fod[3], fod[4], fod[5],
-				fod[6], fod[7], fod[8], fod[9], fod[10], fod[11]);
+			pr_info("%s: FOD(0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X"
+				"0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X"
+				"0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X)\n", __func__,
+				fod[0], fod[1], fod[2], fod[3], fod[4], fod[5], fod[6],
+				fod[7], fod[8], fod[9], fod[10], fod[11], fod[12], fod[13],
+				fod[14], fod[15], fod[16], fod[17], fod[18], fod[19]);
 		}
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
@@ -3779,7 +3030,7 @@ out:
 	{
 		int vout = 0, vrect = 0;
 		u8 is_vout_on = 0;
-		i = 0;
+
 		mfc_reg_read(charger->client, MFC_STATUS_L_REG, &is_vout_on);
 		is_vout_on = is_vout_on >> 7;
 		vout = mfc_get_adc(charger, MFC_ADC_VOUT);
@@ -3820,6 +3071,20 @@ out:
 		}
 	}
 		break;
+	case POWER_SUPPLY_PROP_CURRENT_MAX:
+		charger->input_current = val->intval;
+		pr_info("%s: input_current: %d\n", __func__, charger->input_current);
+		if (charger->pdata->vout_status <= MFC_VOUT_5_5V) {
+			if (charger->is_full_status) {
+				mfc_cma_cmb_onoff(charger, false, true);
+			} else {
+				if (charger->input_current < 700)  //700mA
+					mfc_cma_cmb_onoff(charger, true, false);
+				else
+					mfc_cma_cmb_onoff(charger, false, true);
+			}
+		}
+		break;
 	case POWER_SUPPLY_PROP_SCOPE:
 		return -ENODATA;
 	case POWER_SUPPLY_PROP_MAX ... POWER_SUPPLY_EXT_PROP_MAX:
@@ -3858,7 +3123,7 @@ out:
 			charger->wc_rx_connected = val->intval;
 			wake_lock(&charger->wpc_rx_connection_lock);
 			queue_delayed_work(charger->wqueue,
-				&charger->wpc_rx_connection_work, 0);			
+				&charger->wpc_rx_connection_work, 0);
 			break;
 		case POWER_SUPPLY_EXT_PROP_WIRELESS_AUTH_ADT_STATUS: /* it has only PASS and FAIL */
 #if !defined(CONFIG_SEC_FACTORY)
@@ -3925,13 +3190,13 @@ out:
 				pr_info("%s %s : Don't need to set TX 90sec timer, on TX OFF state\n", WC_AUTH_MSG, __func__);
 			break;
 		case POWER_SUPPLY_EXT_PROP_WIRELESS_MIN_DUTY:
-			cancel_delayed_work(&charger->wpc_tx_op_freq_work);
-			if (val->intval == 50) {
-				mfc_set_tx_op_freq(charger, 110);
-			} else {
-				mfc_set_tx_op_freq(charger, 148);
+			if (delayed_work_pending(&charger->wpc_tx_duty_min_work)) {
+				wake_unlock(&charger->wpc_tx_duty_min_lock);
+				cancel_delayed_work(&charger->wpc_tx_duty_min_work);
 			}
-			mfc_set_min_duty(charger, val->intval);
+			charger->duty_min = val->intval;
+			wake_lock(&charger->wpc_tx_duty_min_lock);
+			queue_delayed_work(charger->wqueue, &charger->wpc_tx_duty_min_work, msecs_to_jiffies(0));
 			break;
 		case POWER_SUPPLY_EXT_PROP_CALL_EVENT:
 			if (val->intval & BATT_EXT_EVENT_CALL) {
@@ -3955,36 +3220,6 @@ out:
 				charger->device_event &= ~BATT_EXT_EVENT_CALL;
 			}
 			break;
-#if defined(CONFIG_WIRELESS_IC_PARAM)
-		case POWER_SUPPLY_EXT_PROP_WIRELESS_PARAM_INFO:
-			mfc_set_wireless_ic_param(charger, charger->chip_id_now, charger->pdata->otp_firmware_ver);
-			break;
-#endif
-		case POWER_SUPPLY_EXT_PROP_PAD_VOLT_CTRL:
-			if(charger->pdata->wpc_vout_ctrl_lcd_on) {
-				if (delayed_work_pending(&charger->wpc_vout_mode_work)) {
-					pr_info("%s : Already vout change. skip pad control\n", __func__);
-					return 0;
-				}
-				if (val->intval && charger->is_afc_tx &&
-					(charger->tx_id != TX_ID_UNKNOWN) &&
-					(charger->tx_id != TX_ID_DREAM_DOWN &&
-					charger->tx_id != TX_ID_DREAM_STAND)) {
-					mfc_send_command(charger, MFC_AFC_CONF_5V_TX);
-					pr_info("%s: set TX 5V because LCD ON\n", __func__);
-					charger->is_afc_tx = false;
-					charger->pad_ctrl_by_lcd = true;
-				} else if (!val->intval && !charger->is_afc_tx && charger->pad_ctrl_by_lcd){
-					if (charger->pdata->cable_type == SEC_WIRELESS_PAD_WPC_HV_20)
-						mfc_send_command(charger, charger->vrect_by_txid);
-					else
-						mfc_send_command(charger, MFC_AFC_CONF_10V_TX);
-					charger->is_afc_tx = true;
-					charger->pad_ctrl_by_lcd = false;
-					pr_info("%s: need to set afc tx becasue LCD OFF\n", __func__);
-				}
-			}
-			break;
 		case POWER_SUPPLY_EXT_PROP_WIRELESS_VOUT:
 			{
 				int i=0;
@@ -4004,6 +3239,11 @@ out:
 			else
 				mfc_set_wpc_en(charger, WPC_EN_MST, false);
 			break;
+#if defined(CONFIG_WIRELESS_IC_PARAM)
+		case POWER_SUPPLY_EXT_PROP_WIRELESS_PARAM_INFO:
+			mfc_set_wireless_ic_param(charger, charger->chip_id_now, charger->pdata->otp_firmware_ver);
+			break;
+#endif
 		default:
 			return -ENODATA;
 		}
@@ -4020,7 +3260,7 @@ static void mfc_wpc_opfq_work(struct work_struct *work)
 {
 	struct mfc_charger_data *charger =
 		container_of(work, struct mfc_charger_data, wpc_opfq_work.work);
-
+#if 0
 	u16 op_fq;
 	u8 pad_mode;
 	union power_supply_propval value;
@@ -4046,6 +3286,7 @@ static void mfc_wpc_opfq_work(struct work_struct *work)
 			psy_do_property("wireless", set, POWER_SUPPLY_PROP_ONLINE, value);
 	}
 	charger->pdata->opfq_cnt = 0;
+#endif	
 	wake_unlock(&charger->wpc_opfq_lock);
 
 }
@@ -4112,12 +3353,15 @@ static void mfc_wpc_det_work(struct work_struct *work)
 	union power_supply_propval value;
 	u8 pad_mode;
 	u8 vrect;
-#if !defined(CONFIG_WIRELESS_NO_HV)
 	int vrect_level, vout_level;
-#endif
 
 	mfc_get_chip_id(charger);
+	pr_info("%s : start\n", __func__);
 
+	/*
+	* We don't have to handle the wpc detect handling,
+	* when it's the MST mode.
+	*/
 	if (charger->is_mst_on == MST_MODE_2) {
 		pr_info("%s: check wpc-state(%d - %d)\n", __func__,
 			charger->wc_w_state, gpio_get_value(charger->pdata->wpc_det));
@@ -4128,14 +3372,34 @@ static void mfc_wpc_det_work(struct work_struct *work)
 		}
 	}
 
-	wc_w_state = gpio_get_value(charger->pdata->wpc_det);
-	if (charger->wc_w_state == wc_w_state)
-		return;
-
 	wake_lock(&charger->wpc_wake_lock);
-	pr_info("%s: w(%d to %d)\n", __func__, charger->wc_w_state, wc_w_state);
-	charger->wc_w_state = wc_w_state;
-	if (charger->wc_w_state) {
+	pr_info("%s\n", __func__);
+	wc_w_state = gpio_get_value(charger->pdata->wpc_det);
+
+#if defined(CONFIG_CHARGER_S2MU106)
+	if(wc_w_state) {
+		u8 status_h = 0, reg_data = 0;
+		mfc_reg_read(charger->client, 0xA1, &reg_data);
+		if (reg_data == 1) {
+			mfc_reg_read(charger->client, MFC_STATUS_H_REG, &status_h);
+			pr_info("%s: status_h(0x%x)\n", __func__, status_h);
+			wc_w_state &= !!(status_h & MFC_STAT_H_TX_CON_DISCON_MASK);
+		}
+	}
+#endif
+
+	if ((charger->wc_w_state == 0) && (wc_w_state == 1)) {
+		int i = 0;
+
+		for (i = 0; i < 3; i++) {
+			if (mfc_get_chip_id(charger) >= 0)
+				break;
+		}
+		if (i == 3) {
+			wake_unlock(&charger->wpc_wake_lock);
+			return;
+		}
+
 		charger->initial_wc_check = true;
 
 		charger->pdata->otp_firmware_ver = mfc_get_firmware_version(charger, MFC_RX_FIRMWARE);
@@ -4149,41 +3413,22 @@ static void mfc_wpc_det_work(struct work_struct *work)
 
 		charger->wc_tx_enable = false;
 		charger->gear_start_time = 0;
-#if 0 /* To prepare for the future issue */
-		/* read firmware version */
-		if (mfc_get_firmware_version(charger, MFC_RX_FIRMWARE) == MFC_OTP_FIRM_VERSION && adc_cal > 0)
-			mfc_runtime_sram_change(charger);/* change sram */
-#endif
 
 		/* enable Mode Change INT */
 		mfc_reg_update(charger->client, MFC_INT_A_ENABLE_L_REG,
-						MFC_STAT_L_OP_MODE_MASK, MFC_STAT_L_OP_MODE_MASK);
-
+				MFC_STAT_L_OP_MODE_MASK, MFC_STAT_L_OP_MODE_MASK);
 		mfc_reg_update(charger->client, MFC_INT_A_ENABLE_L_REG,
-						MFC_STAT_H_ADT_RECEIVED_MASK, MFC_STAT_H_ADT_RECEIVED_MASK);
+				MFC_STAT_L_OVER_TEMP_MASK, MFC_STAT_L_OVER_TEMP_MASK);
 
 		/* SET OV 17V */
-		mfc_reg_write(charger->client, MFC_RX_OV_CLAMP_REG, 0x0);
-#if defined(CONFIG_SEC_BLOOMQ_PROJECT)
-		/* SET ILIM 1.6A */
-		mfc_reg_write(charger->client, MFC_ILIM_SET_REG, 0x0F);
-#else
+		mfc_reg_write(charger->client, MFC_RX_OV_CLAMP_REG, 0x3);
 		/* SET ILIM 1.5A */
-		mfc_reg_write(charger->client, MFC_ILIM_SET_REG, 0x0E);
-#endif
+		mfc_reg_write(charger->client, MFC_ILIM_SET_REG, 0x1D);
+
 		/* read vrect adjust */
 		mfc_reg_read(charger->client, MFC_VRECT_ADJ_REG, &vrect);
 
 		pr_info("%s: wireless charger activated, set V_INT as PN\n", __func__);
-
-		mfc_reg_write(charger->client, MFC_RX_COMM_MOD_AFC_FET_REG, 0x00);
-#if !defined(CONFIG_SEC_BLOOMQ_PROJECT)
-		/* use CMA FET */
-		mfc_reg_write(charger->client, MFC_RX_COMM_MOD_FET_REG, 0x30);
-#else
-		/* use CMB FET */
-		mfc_reg_write(charger->client, MFC_RX_COMM_MOD_FET_REG, 0xC0);
-#endif
 
 		/* read pad mode */
 		mfc_reg_read(charger->client, MFC_SYS_OP_MODE_REG, &pad_mode);
@@ -4206,34 +3451,32 @@ static void mfc_wpc_det_work(struct work_struct *work)
 		if (charger->pdata->fod_data_check)
 			mfc_fod_set(charger);
 
-#if !defined(CONFIG_WIRELESS_NO_HV)
-		vrect_level = mfc_get_adc(charger, MFC_ADC_VRECT);
-		vout_level = mfc_get_adc(charger, MFC_ADC_VOUT);
-		pr_info("%s: read vrect(%dmV), vout(%dmV)\n", __func__, vrect_level, vout_level);
+		if (!charger->pdata->no_hv) {
+			vrect_level = mfc_get_adc(charger, MFC_ADC_VRECT);
+			vout_level = mfc_get_adc(charger, MFC_ADC_VOUT);
+			pr_info("%s: read vrect(%dmV), vout(%dmV)\n", __func__, vrect_level, vout_level);
 
-		/* reboot status with previous hv voltage setting */
-		if (vrect_level >= 8500 && vout_level >= 8500) {
-			/* re-set vout level */
-			charger->pad_vout = PAD_VOUT_10V;
-			mfc_set_vout(charger, MFC_VOUT_10V);
+			/* reboot status with previous hv voltage setting */
+			if (vrect_level >= 8500 && vout_level >= 8500) {
+				/* re-set vout level */
+				charger->pad_vout = PAD_VOUT_10V;
+				mfc_set_vout(charger, MFC_VOUT_10V);
 
-			/* change cable type */
-			charger->pdata->cable_type = value.intval = SEC_WIRELESS_PAD_WPC_HV;
-			psy_do_property("wireless", set,
-				POWER_SUPPLY_PROP_ONLINE, value);
-		} else {
-			/* send request afc_tx , request afc is mandatory */
-			msleep(200);
-			mfc_send_command(charger, MFC_REQUEST_AFC_TX);
+				/* change cable type */
+				charger->pdata->cable_type = value.intval = SEC_WIRELESS_PAD_WPC_HV;
+				psy_do_property("wireless", set,
+					POWER_SUPPLY_PROP_ONLINE, value);
+			} else {
+				/* send request afc_tx , request afc is mandatory */
+				msleep(200);
+				mfc_send_command(charger, MFC_REQUEST_AFC_TX);
+			}
 		}
-#endif
-		/* set rpp scaling factor for LED cover */
-		mfc_rpp_set(charger);
 		charger->pdata->is_charging = 1;
 
 		wake_lock(&charger->wpc_tx_id_lock);
 		queue_delayed_work(charger->wqueue, &charger->wpc_tx_id_work, msecs_to_jiffies(2500));
-	} else {
+	} else if ((charger->wc_w_state == 1) && (wc_w_state == 0)) {
 		/* Send last tx_id to battery to cound tx_id */ 
 		value.intval = charger->tx_id;
 		psy_do_property("wireless", set, POWER_SUPPLY_PROP_AUTHENTIC, value);
@@ -4248,7 +3491,6 @@ static void mfc_wpc_det_work(struct work_struct *work)
 		charger->is_full_status = 0;
 		charger->pdata->capacity = 101;
 		charger->is_afc_tx = false;
-		charger->pad_ctrl_by_lcd = false;
 		charger->tx_id = TX_ID_UNKNOWN;
 		charger->i2c_error_count = 0;
 		charger->adt_transfer_status = WIRELESS_AUTH_WAIT;
@@ -4274,29 +3516,70 @@ static void mfc_wpc_det_work(struct work_struct *work)
 			wake_unlock(&charger->wpc_vout_mode_lock);
 			cancel_delayed_work(&charger->wpc_vout_mode_work);
 		}
-		if (delayed_work_pending(&charger->wpc_cs100_work)) {
-			wake_unlock(&charger->wpc_cs100_lock);
-			cancel_delayed_work(&charger->wpc_cs100_work);
-		}
 
 		cancel_delayed_work(&charger->wpc_isr_work);
 		cancel_delayed_work(&charger->wpc_tx_isr_work);
 		cancel_delayed_work(&charger->wpc_tx_id_work);
 		cancel_delayed_work(&charger->wpc_i2c_error_work);
+#if defined(CONFIG_SEC_FACTORY)
+		cancel_delayed_work(&charger-> evt2_err_detect_work);
+#endif
 		wake_unlock(&charger->wpc_rx_wake_lock);
 		wake_unlock(&charger->wpc_tx_wake_lock);
 		wake_unlock(&charger->wpc_tx_id_lock);
 	}
+
+	pr_info("%s: w(%d to %d)\n", __func__,
+		charger->wc_w_state, wc_w_state);
+
+	charger->wc_w_state = wc_w_state;
 	wake_unlock(&charger->wpc_wake_lock);
-
-	/* cancel vrect check work */
-	wake_unlock(&charger->wpc_vrect_check_lock);
-	cancel_delayed_work(&charger->wpc_vrect_check_work);
-	charger->initial_vrect = false;
-
-	pr_info("%s : end\n", __func__);
 }
 
+static void mfc_wpc_pdrc_work(struct work_struct *work)
+{
+	struct mfc_charger_data *charger =
+		container_of(work, struct mfc_charger_data, wpc_pdrc_work.work);
+	int wc_w_state;
+	union power_supply_propval value;
+
+	if (charger->is_mst_on == MST_MODE_2 || charger->wc_tx_enable) {
+		pr_info("%s: Noise made false Vrect IRQ !\n", __func__);
+		if (charger->wc_tx_enable) {
+			value.intval = BATT_TX_EVENT_WIRELESS_TX_ETC;
+			psy_do_property("wireless", set, POWER_SUPPLY_EXT_PROP_WIRELESS_TX_ERR, value);
+		}
+		wake_unlock(&charger->wpc_pdrc_lock);
+		return;
+	}
+
+	wc_w_state = gpio_get_value(charger->pdata->wpc_pdrc);
+	pr_info("%s : cable_type: %d,status: %d\n", __func__, charger->pdata->cable_type, wc_w_state);
+
+	if (charger->pdata->cable_type == SEC_WIRELESS_PAD_NONE && (wc_w_state == 0)) {
+		int i = 0;
+
+		for (i = 0; i < 3; i++) {
+			if (mfc_get_chip_id(charger) >= 0)
+				break;
+		}
+		if (i == 3) {
+			wake_unlock(&charger->wpc_pdrc_lock);
+			return;
+		}
+		charger->pdata->cable_type = value.intval = SEC_WIRELESS_PAD_FAKE;
+		psy_do_property("wireless", set, POWER_SUPPLY_PROP_ONLINE, value);
+#if defined(CONFIG_SEC_FACTORY)
+		queue_delayed_work(charger->wqueue, &charger->evt2_err_detect_work, msecs_to_jiffies(100));
+#endif
+	} else if ((charger->pdata->cable_type == SEC_WIRELESS_PAD_FAKE) && (wc_w_state == 1)) {
+		charger->pdata->cable_type = SEC_WIRELESS_PAD_NONE;
+		value.intval = SEC_WIRELESS_PAD_NONE;
+		psy_do_property("wireless", set, POWER_SUPPLY_PROP_ONLINE, value);
+	}
+
+	wake_unlock(&charger->wpc_pdrc_lock);
+}
 /* INT_A */
 static void mfc_wpc_tx_isr_work(struct work_struct *work)
 {
@@ -4323,6 +3606,60 @@ static void mfc_wpc_tx_isr_work(struct work_struct *work)
 
 	wake_unlock(&charger->wpc_tx_wake_lock);
 }
+
+#if defined(CONFIG_SEC_FACTORY)
+static void mfc_evt2_err_detect_work(struct work_struct *work)
+{
+	struct mfc_charger_data *charger =
+		container_of(work, struct mfc_charger_data, evt2_err_detect_work.work);
+
+	u8 status = 0;
+	int ret = 0;
+	u8 data[16] = {0xC,0xD,0xE,0xF,0x0,0x1,0x2,0x3,0x8,0x8,0x8,0x8,0x8,0x9,0xA,0xB};
+		
+	pr_info("%s: work for evt2_err_detect\n", __func__);
+
+	ret = mfc_reg_update(charger->client, 0x5130, (0x1 << 1), (0x1 << 1));
+	if (ret < 0) {
+		pr_err("%s: Failed to read: %d\n", __func__, ret);
+		return;
+	}
+
+	/* read reg : 0x5130 */
+	pr_info("%s: Read reg : 0x5130\n", __func__);
+	ret = mfc_reg_read(charger->client, 0x5130, &status);
+	if (ret < 0) {
+		pr_err("%s: Failed to read: %d\n", __func__, ret);
+		return;
+	}
+	pr_info("%s: after 0x5130(0x%x)\n", __func__, status);
+
+       /* read reg : 0x5135 */
+	pr_info("%s: Read reg : 0x5135\n", __func__);
+	ret = mfc_reg_read(charger->client, 0x5135, &status);
+	if (ret < 0) {
+		pr_err("%s: Failed to read: %d\n", __func__, ret);
+		return;
+	}
+	pr_info("%s: before 0x5135(0x%x)\n", __func__, status);
+
+	status = (status >> 4) & 0xF;
+	pr_info("%s: status(0x%x) -> (0x%x)\n", __func__, status, data[status]);
+
+	ret = mfc_reg_update(charger->client, 0x5135, data[status] << 4, 0xF << 4);
+	if (ret < 0) {
+		pr_err("%s: Failed to read: %d\n", __func__, ret);
+		return;
+	}
+
+	ret = mfc_reg_read(charger->client, 0x5135, &status);
+	if (ret < 0) {
+		pr_err("%s: Failed to read: %d\n", __func__, ret);
+		return;
+	}
+	pr_info("%s: after 0x5135(0x%x)\n", __func__, status);
+}
+#endif
 
 /* INT_A */
 static void mfc_wpc_isr_work(struct work_struct *work)
@@ -4365,25 +3702,25 @@ static void mfc_wpc_isr_work(struct work_struct *work)
 				wake_unlock(&charger->wpc_rx_wake_lock);
 				return;
 			}
-#if !defined(CONFIG_WIRELESS_NO_HV)
-			if (is_hv_wireless_pad_type(charger->pdata->cable_type) ||
-				charger->pdata->cable_type == SEC_WIRELESS_PAD_PREPARE_HV) {
-				pr_err("%s: Is is already HV wireless cable. No need to set again\n", __func__);
-				wake_unlock(&charger->wpc_rx_wake_lock);
-				return;
+			if (!charger->pdata->no_hv) {
+				if (is_hv_wireless_pad_type(charger->pdata->cable_type) ||
+						charger->pdata->cable_type == SEC_WIRELESS_PAD_PREPARE_HV) {
+					pr_err("%s: Is is already HV wireless cable. No need to set again\n", __func__);
+					wake_unlock(&charger->wpc_rx_wake_lock);
+					return;
+				}
+
+				/* send AFC_SET */
+				mfc_send_command(charger, MFC_AFC_CONF_10V);
+				msleep(500);
+
+				/* change cable type */
+				charger->pdata->cable_type = value.intval = SEC_WIRELESS_PAD_PREPARE_HV;
+				psy_do_property("wireless", set,
+						POWER_SUPPLY_PROP_ONLINE, value);
+
+				charger->pad_vout = PAD_VOUT_10V;
 			}
-
-			/* send AFC_SET */
-			mfc_send_command(charger, MFC_AFC_CONF_10V);
-			msleep(500);
-
-			/* change cable type */
-			charger->pdata->cable_type = value.intval = SEC_WIRELESS_PAD_PREPARE_HV;
-			psy_do_property("wireless", set,
-				POWER_SUPPLY_PROP_ONLINE, value);
-
-			charger->pad_vout = PAD_VOUT_10V;
-#endif
 			break;
 		case TX_AFC_SET_12V:
 			break;
@@ -4426,7 +3763,7 @@ static void mfc_wpc_isr_work(struct work_struct *work)
 					}
 				} else {
 					charger->pdata->cable_type = value.intval = SEC_WIRELESS_PAD_WPC_STAND;
-					mfc_fod_set_hero_5v(charger);
+					//mfc_fod_set_hero_5v(charger);
 				}
 				pr_info("%s: STAND Wireless Charge PAD %s\n", __func__,
 					charger->pad_vout == PAD_VOUT_10V ? "HV" : "");
@@ -4473,29 +3810,14 @@ static void mfc_wpc_isr_work(struct work_struct *work)
 					mfc_send_command(charger, MFC_PHM_ON);
 				}
 				break;
-			case TX_ID_NON_AUTH_PAD ... TX_ID_NON_AUTH_PAD_END:
-				value.intval = charger->pdata->cable_type;
-				if (charger->pdata->wpc_vout_ctrl_lcd_on) {
-					pr_info("%s: tx id = 0x%x , set op freq\n", __func__, val_data);
-					mfc_send_command(charger, MFC_SET_OP_FREQ);
-					msleep(500);
-				}
-				break;
 			case TX_ID_AUTH_PAD ... TX_ID_AUTH_PAD_END:
-#if defined(CONFIG_WIRELESS_NO_HV)
-				pr_info("%s: WIRELESS HV is disabled\n");
-				break;
-#endif
+				if (charger->pdata->no_hv) {
+					pr_info("%s: WIRELESS HV is disabled\n", __func__);
+					break;
+				}
 				charger->vout_by_txid = mfc_get_wireless20_vout_by_txid(charger, val_data);
 				charger->vrect_by_txid = mfc_get_wireless20_vrect_by_txid(charger, val_data);
 				charger->max_power_by_txid = mfc_get_wireless20_max_power_by_txid(charger, val_data);
-
-				if (charger->pdata->wpc_vout_ctrl_lcd_on &&
-					(val_data >= TX_ID_DAVINCI_PAD_H && val_data <= TX_ID_AUTH_PAD_ACLASS_END)) {
-					pr_info("%s: tx id = 0x%x , set op freq\n", __func__, val_data);
-					mfc_send_command(charger, MFC_SET_OP_FREQ);
-					msleep(500);
-				}
 #if !defined(CONFIG_SEC_FACTORY)
 				/* do not process during lpm and wired charging */
 				if(!lpcharge) {
@@ -4673,174 +3995,85 @@ static void mfc_wpc_tx_id_work(struct work_struct *work)
 
 	pr_info("%s\n", __func__);
 
-	mfc_send_command(charger, MFC_REQUEST_TX_ID);
-	charger->tx_id_cnt++;
+	if (!charger->tx_id) {
+		mfc_send_command(charger, MFC_REQUEST_TX_ID);
+		charger->tx_id_cnt++;
 
-	if ((charger->tx_id_cnt <= 10) && !charger->tx_id) {
-		pr_info("%s: request TX ID (%d)\n", __func__, charger->tx_id_cnt);
-		queue_delayed_work(charger->wqueue, &charger->wpc_tx_id_work, msecs_to_jiffies(1500));
-		return;
+		if (charger->tx_id_cnt <= 10) {
+			pr_info("%s: request TX ID (%d)\n", __func__, charger->tx_id_cnt);
+			queue_delayed_work(charger->wqueue, &charger->wpc_tx_id_work, msecs_to_jiffies(1500));
+			return;
+		}
+		pr_info("%s: TX ID not Received, cable_type(%d)\n",
+			__func__, charger->pdata->cable_type);
+		if (is_hv_wireless_pad_type(charger->pdata->cable_type)) {
+			/* SET OV 13V */
+			mfc_reg_write(charger->client, MFC_RX_OV_CLAMP_REG, 0x1);
+		} else {
+			/* SET OV 11V */
+			mfc_reg_write(charger->client, MFC_RX_OV_CLAMP_REG, 0x0);
+		}
 	} else {
-		if (charger->tx_id)
-			pr_info("%s: TX ID (0x%x)\n", __func__, charger->tx_id);
-		else {
-			pr_info("%s: TX ID not Received, cable_type(%d)\n",
-				__func__, charger->pdata->cable_type);
-			if (is_hv_wireless_pad_type(charger->pdata->cable_type)) {
-				/* SET OV 13V */
-				mfc_reg_write(charger->client, MFC_RX_OV_CLAMP_REG, 0x3);
-			} else {
-				/* SET OV 11V */
-				mfc_reg_write(charger->client, MFC_RX_OV_CLAMP_REG, 0x4);
-			}
-		}
-		charger->tx_id_cnt = 0;
+		pr_info("%s: TX ID (0x%x)\n", __func__, charger->tx_id);
 	}
+
 	wake_unlock(&charger->wpc_tx_id_lock);
-}
-
-static void mfc_vrect_check_work(struct work_struct *work)
-{
-	struct mfc_charger_data *charger =
-		container_of(work, struct mfc_charger_data, wpc_vrect_check_work.work);
-	
-	int vrect = 0;
-	u8 irq_src[2];
-	union power_supply_propval value = {0, };
-	vrect = mfc_get_adc(charger, MFC_ADC_VRECT);
-	pr_info("%s: vrect: %dmV\n", __func__, vrect);
-
-	if (!charger->initial_vrect) {
-		if (charger->pdata->cable_type == SEC_WIRELESS_PAD_NONE) {
-			/* Attach case */
-			charger->pdata->cable_type = value.intval = SEC_WIRELESS_PAD_FAKE;
-			psy_do_property("wireless", set, POWER_SUPPLY_PROP_ONLINE, value);
-
-			/* To make sure forced detach if VOUT_GD is not rising within 3 seconds */
-			charger->initial_vrect = true;
-			queue_delayed_work(charger->wqueue, &charger->wpc_vrect_check_work, msecs_to_jiffies(3000));
-			return;
-		} else if (vrect >= 2700 && !charger->is_mst_on) {
-			if (charger->pdata->cable_type == SEC_WIRELESS_PAD_FAKE) {
-				pr_info("%s: Temporary UVLO, FAKE. check again.\n", __func__);
-				queue_delayed_work(charger->wqueue, &charger->wpc_vrect_check_work, msecs_to_jiffies(300));
-			} else {
-				pr_info("%s: Temporary UVLO, hold on wireless charging\n", __func__);
-				wake_unlock(&charger->wpc_vrect_check_lock);
-			}
-			return;
-		}
-	}
-
-	/* Detach case */
-	pr_info("%s: Vrect IRQ! wireless charging pad was removed!!\n", __func__);
-	/* clear intterupt */
-	if (charger->pdata->cable_type == SEC_WIRELESS_PAD_FAKE &&
-		!gpio_get_value(charger->pdata->wpc_int)) {
-		charger->pdata->cable_type = SEC_WIRELESS_PAD_NONE;
-		mfc_reg_read(charger->client, MFC_INT_A_L_REG, &irq_src[0]);
-		mfc_reg_read(charger->client, MFC_INT_A_H_REG, &irq_src[1]);
-		mfc_reg_write(charger->client, MFC_INT_A_CLEAR_L_REG, irq_src[0]); // clear int
-		mfc_reg_write(charger->client, MFC_INT_A_CLEAR_H_REG, irq_src[1]); // clear int
-		mfc_set_cmd_l_reg(charger, 0x20, MFC_CMD_CLEAR_INT_MASK); // command
-		pr_info("%s wc_w_state_irq = %d\n", __func__, gpio_get_value(charger->pdata->wpc_int));
-	}
-	charger->pdata->cable_type = SEC_WIRELESS_PAD_NONE;
-	charger->initial_vrect = false;
-	value.intval = SEC_WIRELESS_PAD_NONE;
-	psy_do_property("wireless", set, POWER_SUPPLY_PROP_ONLINE, value);
-	wake_unlock(&charger->wpc_vrect_check_lock);
-}
-
-/*
-* Prevent the un-wanted INT_A Falling handling.
-* This is a work-around, and will be fixed by the revision.
-*/
-static void mfc_mst_off_work(struct work_struct *work)
-{
-	struct mfc_charger_data *charger =
-		container_of(work, struct mfc_charger_data, mst_off_work.work);
-	pr_info("%s\n", __func__);
-
-	charger->mst_off_lock = 1;
-	msleep(25);
-	charger->mst_off_lock = 0;
 }
 
 static irqreturn_t mfc_wpc_det_irq_thread(int irq, void *irq_data)
 {
 	struct mfc_charger_data *charger = irq_data;
-	u8 irq_src[2];
 
 	pr_info("%s !\n", __func__);
-
-	if (charger->is_probed) {
-		queue_delayed_work(charger->wqueue, &charger->wpc_det_work, 0);
-		/* clear intterupt */
-		if (charger->pdata->cable_type == SEC_WIRELESS_PAD_FAKE) {
-			mfc_reg_read(charger->client, MFC_INT_A_L_REG, &irq_src[0]);
-			mfc_reg_read(charger->client, MFC_INT_A_H_REG, &irq_src[1]);
-			mfc_reg_write(charger->client, MFC_INT_A_CLEAR_L_REG, irq_src[0]); // clear int
-			mfc_reg_write(charger->client, MFC_INT_A_CLEAR_H_REG, irq_src[1]); // clear int
-			mfc_set_cmd_l_reg(charger, 0x20, MFC_CMD_CLEAR_INT_MASK); // command
-			pr_info("%s wc_w_state_irq = %d\n", __func__, gpio_get_value(charger->pdata->wpc_int));
-		}
-	}
-	else
-		pr_info("%s: prevent work thread before device is probed.\n", __func__);
+	queue_delayed_work(charger->wqueue, &charger->wpc_det_work, 0);
 
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t mfc_wpc_pdrc_irq_thread(int irq, void *irq_data)
+{
+	struct mfc_charger_data *charger = irq_data;
+
+	pr_info("%s : %d \n", __func__, charger->pdata->cable_type);
+	if (charger->pdata->cable_type == SEC_WIRELESS_PAD_NONE) {
+		wake_lock(&charger->wpc_pdrc_lock);
+		queue_delayed_work(charger->wqueue, &charger->wpc_pdrc_work, msecs_to_jiffies(0));
+	} else if (charger->pdata->cable_type == SEC_WIRELESS_PAD_FAKE) {
+		wake_lock(&charger->wpc_pdrc_lock);
+		queue_delayed_work(charger->wqueue, &charger->wpc_pdrc_work, msecs_to_jiffies(900));
+	}
+
+	return IRQ_HANDLED;
+}
 /* mfc_mst_routine : MST dedicated codes */
 static void mfc_mst_routine(struct mfc_charger_data *charger, u8 irq_src_l, u8 irq_src_h)
 {
 	u8 data = 0;
-#if defined(CONFIG_MFC_LDO_COMMAND)
-	u8 sBuf[2] = {0, };
-#endif
 
 	pr_info("%s\n", __func__);
 
 	if (charger->is_mst_on == MST_MODE_2) {
 		charger->wc_tx_enable = false;
-		/* clear intterupt */
-		mfc_reg_write(charger->client, MFC_INT_A_CLEAR_L_REG, irq_src_l); // clear int
-		mfc_reg_write(charger->client, MFC_INT_A_CLEAR_H_REG, irq_src_h); // clear int
-		mfc_set_cmd_l_reg(charger, 0x20, MFC_CMD_CLEAR_INT_MASK); // command
-#if defined(CONFIG_MFC_LDO_COMMAND)
-		mfc_reg_write(charger->client, MFC_MST_LDO_CONFIG_1, 0xA5); /* MST LDO config 1 */
-		mfc_reg_write(charger->client, MFC_MST_LDO_CONFIG_2, 0x03); /* MST LDO config 2 */
-		mfc_reg_write(charger->client, MFC_MST_LDO_CONFIG_3, 0x14); /* MST LDO config 3 */
-		mfc_reg_write(charger->client, MFC_MST_LDO_CONFIG_4, 0x0A); /* MST LDO config 4 */
-		mfc_reg_write(charger->client, MFC_MST_LDO_CONFIG_5, 0x02); /* MST LDO config 5 */
-		/* MST LDO config 6 */
-		sBuf[0] = 0xFF;
-		sBuf[1] = 0x01;
-		mfc_reg_multi_write(charger->client, MFC_MST_LDO_CONFIG_6, sBuf, sizeof(sBuf));
-		mfc_reg_write(charger->client, MFC_MST_LDO_TURN_ON, 0x08); /* MST LDO config 7 */
-		mfc_reg_write(charger->client, MFC_MST_LDO_TURN_ON, 0x09); /* MST LDO turn on */
-		msleep(10);
 		mfc_reg_write(charger->client, MFC_MST_MODE_SEL_REG, 0x02); /* set MST mode2 */
-		mfc_reg_write(charger->client, MFC_MST_LDO_CONFIG_8, 0x08); /* MST LDO config 8 */
-		mfc_reg_write(charger->client, MFC_MST_OVER_TEMP_INT, 0x04); /* Enable Over temperature INT */
-#else
-		mfc_reg_write(charger->client, MFC_MST_MODE_SEL_REG, 0x02); /* set MST mode2 */
-#endif
 		pr_info("%s 2AC Missing ! : MST on REV : %d\n", __func__, charger->pdata->wc_ic_rev);
 
 		/* clear intterupt */
 		mfc_reg_write(charger->client, MFC_INT_A_CLEAR_L_REG, irq_src_l); // clear int
 		mfc_reg_write(charger->client, MFC_INT_A_CLEAR_H_REG, irq_src_h); // clear int
-		mfc_set_cmd_l_reg(charger, 0x20, MFC_CMD_CLEAR_INT_MASK); // command
-
-		msleep(10);
+		mfc_set_cmd_l_reg(charger, MFC_CMD_CLEAR_INT_MASK, MFC_CMD_CLEAR_INT_MASK); // command
 	} else if (charger->wc_tx_enable) {
 		mfc_reg_read(charger->client,MFC_STATUS_H_REG, &data);
 		data &= 0x4; /* AC MISSING DETECT */
 		msleep(100);
 		pr_info("@Tx_Mode %s: 0x21 Register AC Missing(%d)\n", __func__, data);
 		if (data) {
+			/* initialize control reg */
+			mfc_set_tx_conflict_current(charger, charger->pdata->tx_conflict_curr_init);
+			mfc_set_min_duty(charger, 20);
+			mfc_set_tx_freq(charger, 1470, 1130, charger->pdata->tx_ping_freq_init);
+			mfc_reg_write(charger->client, MFC_TX_IUNO_HYS_REG, 0x50);
+			mfc_reg_write(charger->client, MFC_DEMOD1_REG, 0x00);
+			mfc_reg_write(charger->client, MFC_DEMOD2_REG, 0x00);
 			mfc_reg_write(charger->client, MFC_MST_MODE_SEL_REG, 0x03); /* set TX-ON mode */
 			pr_info("@Tx_Mode %s: TX-ON Mode : %d\n", __func__, charger->pdata->wc_ic_rev);
 		} //ac missing is 0, ie, TX detected
@@ -4851,11 +4084,9 @@ static void mfc_check_sys_op_mode(struct mfc_charger_data *charger, u8 mode)
 {
 #if defined(CONFIG_TX_GEAR_PHM_VOUT_CTRL)
 	union power_supply_propval value = {0, };
-	u8 data = 0;
 #endif
 
 	mode &= 0xF;
-
 	if (mode == MFC_TX_MODE_TX_PWR_HOLD) {
 		if(charger->wc_rx_type == SS_GEAR) {
 			/* start 3min alarm timer */
@@ -4864,10 +4095,6 @@ static void mfc_check_sys_op_mode(struct mfc_charger_data *charger, u8 mode)
 	    		ktime_add(ktime_get_boottime(), ktime_set(180, 0)));
 
 #if defined(CONFIG_TX_GEAR_PHM_VOUT_CTRL)
-			mfc_reg_update(charger->client, MFC_INT_A_ENABLE_H_REG,
-				0, MFC_STAT_H_TX_CON_DISCON_MASK);
-			mfc_reg_read(charger->client,MFC_INT_A_ENABLE_H_REG, &data);
-
 			charger->tx_gear_phm = 1;
 			value.intval = 1;
 			psy_do_property("wireless", set,
@@ -4885,86 +4112,14 @@ static void mfc_check_sys_op_mode(struct mfc_charger_data *charger, u8 mode)
 				POWER_SUPPLY_EXT_PROP_GEAR_PHM_EVENT, value);
 		}
 #endif
+
 		if(charger->phm_alarm.state & ALARMTIMER_STATE_ENQUEUED) {
 			pr_info("@Tx_Mode %s: escape PHM mode, cancel PHM alarm\n", __func__);
 			cancel_delayed_work(&charger->wpc_tx_phm_work);
 			wake_unlock(&charger->wpc_tx_phm_lock);
 			alarm_cancel(&charger->phm_alarm);
-#if defined(CONFIG_TX_GEAR_PHM_VOUT_CTRL)
-			msleep(400);
-			mfc_reg_update(charger->client, MFC_INT_A_ENABLE_H_REG,
-				MFC_STAT_H_TX_CON_DISCON_MASK, MFC_STAT_H_TX_CON_DISCON_MASK);
-			mfc_reg_read(charger->client,MFC_INT_A_ENABLE_H_REG, &data);
-
-			mfc_reg_read(charger->client,MFC_STATUS_H_REG, &data);
-			pr_info("@Tx_Mode %s MFC_STATUS_H_REG(0x21)= 0x%x\n", __func__, data);
-			if (!(data & MFC_STAT_H_TX_CON_DISCON_MASK)) {
-				/* determine rx connection status with tx sharing mode */
-				if (!charger->wc_rx_connected) {
-					pr_info("@Tx_Mode %s Ignore IRQ!! already Rx disconnected!\n", __func__);
-				} else {
-					charger->wc_rx_connected = false;
-					wake_lock(&charger->wpc_rx_connection_lock);
-					queue_delayed_work(charger->wqueue,
-						&charger->wpc_rx_connection_work, 0);
-				}
-			}
-#endif
 		}
 	}
-}
-
-static int mfc_clear_irq(struct mfc_charger_data *charger, u8 *src_l, u8 *src_h, u8 *status_l, u8 *status_h)
-{
-	int wc_w_state_irq = 0;
-	u8 new_src_l = 0, new_src_h = 0;
-	u8 new_status_l = 0, new_status_h = 0;
-	int ret = 0, rerun_ret = 1;
-
-	pr_info("%s start\n", __func__);
-
-	ret = mfc_reg_write(charger->client, MFC_INT_A_CLEAR_L_REG, *src_l); // clear int
-	ret = mfc_reg_write(charger->client, MFC_INT_A_CLEAR_H_REG, *src_h); // clear int
-	mfc_set_cmd_l_reg(charger, 0x20, MFC_CMD_CLEAR_INT_MASK); // command
-
-	//msleep(2);
-	wc_w_state_irq = gpio_get_value(charger->pdata->wpc_int);
-	pr_info("%s wc_w_state_irq = %d\n", __func__, wc_w_state_irq);
-
-	if (!wc_w_state_irq && (ret >= 0)) {
-		pr_info("%s wc_w_state_irq is not cleared\n", __func__);		
-		ret = mfc_reg_read(charger->client, MFC_INT_A_L_REG, &new_src_l);
-		ret = mfc_reg_read(charger->client, MFC_INT_A_H_REG, &new_src_h);
-			
-		ret = mfc_reg_read(charger->client, MFC_STATUS_L_REG, &new_status_l);
-		ret = mfc_reg_read(charger->client, MFC_STATUS_H_REG, &new_status_h);
-
-		pr_info("%s src_l[0x%x -> 0x%x], src_h[0x%x -> 0x%x], status_l[0x%x -> 0x%x],  status_h[0x%x -> 0x%x]\n",
-			__func__, *src_l, new_src_l, *src_h, new_src_h, *status_l, new_status_l, *status_h, new_status_h);
-
-		rerun_ret = 0; // re-run isr
-
-		/* do not try irq again with i2c fail status, need to end up the irq */
-		if ((*src_l != new_src_l ||
-			*src_h != new_src_h ||
-			*status_l != new_status_l ||
-			*status_h != new_status_h) &&
-			(ret >= 0)) {
-			*src_l = new_src_l;
-			*src_h = new_src_h;
-			*status_l = new_status_l;
-			*status_h = new_status_h;
-			pr_info("%s re-run isr\n", __func__);
-		} else if (ret < 0) {
-			rerun_ret = 1; // do not re-run isr
-			pr_info("%s i2c fail, do not re-run isr\n", __func__);
-		} else {
-			pr_info("%s re-run isr with same src, status\n", __func__);
-		}
-	}
-
-	pr_info("%s end (%d)\n", __func__, rerun_ret);
-	return rerun_ret;
 }
 
 static irqreturn_t mfc_wpc_irq_thread(int irq, void *irq_data)
@@ -4974,49 +4129,29 @@ static irqreturn_t mfc_wpc_irq_thread(int irq, void *irq_data)
 	int ret = 0;
 	u8 irq_src_l = 0, irq_src_h = 0;
 	u8 status_l = 0, status_h = 0;
+	u8 status_l_test = 0, status_h_test = 0;
 	u8 reg_data = 0;
-	int isr_rerun_cnt = 0;	
 	bool end_irq = false;
-	bool clear_irq = true;
 	union power_supply_propval value;
-
-	if (charger->mst_off_lock == 1) {
-		pr_info("%s MST Off Lock!\n", __func__);
-		return IRQ_NONE;
-	}
 
 	pr_info("%s start!\n", __func__);
 
 	wc_w_state_irq = gpio_get_value(charger->pdata->wpc_int);
 	pr_info("%s wc_w_state_irq = %d\n", __func__, wc_w_state_irq);
 
-	if (wc_w_state_irq == 1 &&
-		charger->pdata->cable_type == SEC_WIRELESS_PAD_FAKE) {
-		pr_info("%s: Check vrect after 0.9 second to prevent reconnection by UVLO or Watch ping\n", __func__);
-		if (delayed_work_pending(&charger->wpc_vrect_check_work)) {
-			wake_unlock(&charger->wpc_vrect_check_lock);
-			cancel_delayed_work(&charger->wpc_vrect_check_work);
-		}
-		charger->initial_vrect = false;
-		wake_lock(&charger->wpc_vrect_check_lock);
-		queue_delayed_work(charger->wqueue, &charger->wpc_vrect_check_work, msecs_to_jiffies(900));
-		return IRQ_HANDLED;
-	} else if (wc_w_state_irq == 1) {
-		pr_info("%s Rising edge, End up ISR\n", __func__);
-		return IRQ_HANDLED;
-	}
-
 	wake_lock(&charger->wpc_wake_lock);
 
 	ret = mfc_reg_read(charger->client, MFC_INT_A_L_REG, &irq_src_l);
 	ret = mfc_reg_read(charger->client, MFC_INT_A_H_REG, &irq_src_h);
-
 	ret = mfc_reg_read(charger->client, MFC_STATUS_L_REG, &status_l);
 	ret = mfc_reg_read(charger->client, MFC_STATUS_H_REG, &status_h);
-
-INT_RE:
-	isr_rerun_cnt++;
 	pr_info("%s: interrupt source(0x%x), status(0x%x) \n", __func__, irq_src_h << 8 | irq_src_l, status_h << 8 | status_l);
+	ret = mfc_reg_write(charger->client, MFC_INT_A_CLEAR_L_REG, irq_src_l); // clear int
+	ret = mfc_reg_write(charger->client, MFC_INT_A_CLEAR_H_REG, irq_src_h); // clear int	
+	mfc_set_cmd_l_reg(charger, MFC_CMD_CLEAR_INT_MASK, MFC_CMD_CLEAR_INT_MASK); // command	
+	ret = mfc_reg_read(charger->client, MFC_STATUS_L_REG, &status_l_test);
+	ret = mfc_reg_read(charger->client, MFC_STATUS_H_REG, &status_h_test);
+	pr_info("%s: status after clear irq, status(0x%x) \n", __func__, status_h_test << 8 | status_l_test);
 
 	if (ret < 0) {
 		pr_err("%s: Failed to read interrupt source: %d\n",
@@ -5061,14 +4196,7 @@ INT_RE:
 				end_irq = true;
 				goto INT_END;
 			}
-		} else if (charger->pdata->cable_type == SEC_WIRELESS_PAD_NONE ||
-			charger->pdata->cable_type == SEC_WIRELESS_PAD_FAKE) {
-
-			clear_irq = (charger->pdata->cable_type != SEC_WIRELESS_PAD_NONE);
-			wake_lock(&charger->wpc_vrect_check_lock);
-			queue_delayed_work(charger->wqueue, &charger->wpc_vrect_check_work, msecs_to_jiffies(0));
-		} else
-			pr_info("%s: undefined Vrect IRQ scenario! \n", __func__);
+		}
 	}
 
 	if (irq_src_l & MFC_INTA_L_TXCONFLICT_MASK) {
@@ -5096,26 +4224,31 @@ INT_RE:
 	}
 
 	if (irq_src_h & MFC_INTA_H_TX_CON_DISCON_MASK) {
-		pr_info("@Tx_Mode %s TX CONNECT IRQ !\n", __func__);
-		charger->tx_status = SEC_TX_POWER_TRANSFER;
-		if (status_h & MFC_STAT_H_TX_CON_DISCON_MASK) {
-			/* determine rx connection status with tx sharing mode */
-			if (!charger->wc_rx_connected) {
-				charger->wc_rx_connected = true;
-				wake_lock(&charger->wpc_rx_connection_lock);
-				queue_delayed_work(charger->wqueue,
-					&charger->wpc_rx_connection_work, 0);
+		if (charger->wc_tx_enable) {
+			pr_info("@Tx_Mode %s TX CONNECT IRQ !\n", __func__);
+			charger->tx_status = SEC_TX_POWER_TRANSFER;
+			if (status_h & MFC_STAT_H_TX_CON_DISCON_MASK) {
+				/* determine rx connection status with tx sharing mode */
+				if (!charger->wc_rx_connected) {
+					charger->wc_rx_connected = true;
+					wake_lock(&charger->wpc_rx_connection_lock);
+					queue_delayed_work(charger->wqueue,
+							&charger->wpc_rx_connection_work, 0);
+				}
+			} else {
+				/* determine rx connection status with tx sharing mode */
+				if (!charger->wc_rx_connected) {
+					pr_info("@Tx_Mode %s Ignore IRQ!! already Rx disconnected!\n", __func__);
+				} else {
+					charger->wc_rx_connected = false;
+					wake_lock(&charger->wpc_rx_connection_lock);
+					queue_delayed_work(charger->wqueue,
+							&charger->wpc_rx_connection_work, 0);
+				}
 			}
 		} else {
-			/* determine rx connection status with tx sharing mode */
-			if (!charger->wc_rx_connected) {
-				pr_info("@Tx_Mode %s Ignore IRQ!! already Rx disconnected!\n", __func__);
-			} else {
-				charger->wc_rx_connected = false;
-				wake_lock(&charger->wpc_rx_connection_lock);
-				queue_delayed_work(charger->wqueue,
-					&charger->wpc_rx_connection_work, 0);
-			}
+			if (!(status_h & MFC_STAT_H_TX_CON_DISCON_MASK))
+				queue_delayed_work(charger->wqueue, &charger->wpc_det_work, 0);
 		}
 	}
 
@@ -5160,14 +4293,6 @@ INT_RE:
 	}
 
 INT_END:
-	if (clear_irq) {
-		/* clear intterupt */
-		if(!mfc_clear_irq(charger, &irq_src_l, &irq_src_h, &status_l, &status_h) && isr_rerun_cnt < ISR_CNT)
-			goto INT_RE;
-	} else {
-		pr_info("%s: Vrect IRQ - skip clear INT_A\n", __func__);
-	}
-
 	/* tx off should work having done i2c */
 	if (end_irq)
 		psy_do_property("wireless", set, POWER_SUPPLY_EXT_PROP_WIRELESS_TX_ERR, value);
@@ -5213,12 +4338,10 @@ static int mfc_chg_parse_dt(struct device *dev,
 			pdata->fod_data_cv = kzalloc(sizeof(*pdata->fod_data_cv) * len, GFP_KERNEL);
 			ret = of_property_read_u32_array(np, "battery,fod_data_cv",
 							 pdata->fod_data_cv, len);
-			pdata->fod_data_check = 1;
 
 			for (i = 0; i < len; i++)
 				pr_info("%s fod data_cv = %d ", __func__, pdata->fod_data_cv[i]);
 		} else {
-			pdata->fod_data_check = 0;
 			pr_err("%s there is not fod_data_cv\n", __func__);
 		}
 
@@ -5276,53 +4399,48 @@ static int mfc_chg_parse_dt(struct device *dev,
 		if (ret < 0)
 			pr_info("%s: Fuelgauge name is Empty\n", __func__);
 
-		ret = of_property_read_u32(np, "battery,mst_switch_delay",
-						&pdata->mst_switch_delay);
-		if (ret < 0) {
-			pr_info("%s: mst_switch_delay is Empty\n", __func__);
-			pdata->mst_switch_delay = 1000; /* set default value (dream) */
-		}
-
-		ret = of_property_read_u32(np, "battery,wc_cover_rpp",
-						&pdata->wc_cover_rpp);
-		if (ret < 0) {
-			pr_info("%s: fail to read wc_cover_rpp.\n", __func__);
-			pdata->wc_cover_rpp = 0x55;
-		}
-
 		ret = of_property_read_u32(np, "battery,phone_fod_threshold",
 						&pdata->phone_fod_threshold);
 		if (ret < 0) {
 			pr_info("%s: fail to read phone_fod_threshold\n", __func__);
-			pdata->phone_fod_threshold = 0x50;
-		}
-
-		ret = of_property_read_u32(np, "battery,wc_hv_rpp",
-						&pdata->wc_hv_rpp);
-		if (ret < 0) {
-			pr_info("%s: fail to read wc_hv_rpp.\n", __func__);
-			pdata->wc_hv_rpp = 0x40;
+			pdata->phone_fod_threshold = 0x00;
 		}
 
 		ret = of_property_read_u32(np, "battery,oc_fod1",
 						&pdata->oc_fod1);
 		if (ret < 0) {
 			pr_info("%s: fail to read oc_fod1\n", __func__);
-			pdata->oc_fod1 = 900; /* IC default */
+			pdata->oc_fod1 = 0; /* IC default */
+		}
+
+		ret = of_property_read_u32(np, "battery,tx_ping_freq_init", &pdata->tx_ping_freq_init);
+		if (ret < 0) {
+			pr_info("%s: tx_ping_freq_init is empty\n", __func__);
+			pdata->tx_ping_freq_init = 1450;
+		} else {
+			pr_info("%s: tx_ping_freq_init: %d\n", __func__, pdata->tx_ping_freq_init);
 		}
 
 		ret = of_property_read_u32(np, "battery,gear_ping_freq",
 						&pdata->gear_ping_freq);
 		if (ret < 0) {
 			pr_info("%s: fail to read gear_ping_freq\n", __func__);
-			pdata->gear_ping_freq = 0x96; /* IC default */
+			pdata->gear_ping_freq = pdata->tx_ping_freq_init;
+		}
+
+		ret = of_property_read_u32(np, "battery,tx_conflict_curr_init", &pdata->tx_conflict_curr_init);
+		if (ret < 0) {
+			pr_info("%s: tx_conflict_curr_init is empty\n", __func__);
+			pdata->tx_conflict_curr_init = 1200;
+		} else {
+			pr_info("%s: tx_conflict_curr_init: %d\n", __func__, pdata->tx_conflict_curr_init);
 		}
 
 		ret = of_property_read_u32(np, "battery,gear_min_op_freq",
 						&pdata->gear_min_op_freq);
 		if (ret < 0) {
 			pr_info("%s: fail to read gear_min_op_freq\n", __func__);
-			pdata->gear_min_op_freq = 125;
+			pdata->gear_min_op_freq = 1250;
 		}
 
 		ret = of_property_read_u32(np, "battery,tx_gear_min_op_freq_delay",
@@ -5351,11 +4469,14 @@ static int mfc_chg_parse_dt(struct device *dev,
 			pr_info("%s wpc_int = 0x%x, irq_wpc_int = 0x%x\n", __func__, pdata->wpc_int, pdata->irq_wpc_int);
 		}
 
-		/* mst_pwr_en (MST PWR EN) */
-		ret = pdata->mst_pwr_en = of_get_named_gpio_flags(np, "battery,mst_pwr_en",
+		/* wpc_pdrc (This GPIO means PDET_B) */
+		ret = pdata->wpc_pdrc = of_get_named_gpio_flags(np, "battery,wpc_pdrc",
 				0, &irq_gpio_flags);
 		if (ret < 0) {
-			dev_err(dev, "%s : can't mst_pwr_en\r\n", __FUNCTION__);
+			dev_err(dev, "%s : can't wpc_pdrc\r\n", __FUNCTION__);
+		} else {
+			pdata->irq_wpc_pdrc = gpio_to_irq(pdata->wpc_pdrc);
+			pr_info("%s wpc_pdrc = 0x%x, irq_wpc_pdrc = 0x%x\n", __func__, pdata->wpc_pdrc, pdata->irq_wpc_pdrc);
 		}
 
 		/* wpc_en (MFC EN) */
@@ -5374,6 +4495,13 @@ static int mfc_chg_parse_dt(struct device *dev,
 				}
 			}
 			np  = dev->of_node;
+		}
+
+		/* ping_nen (PING nEN) */
+		ret = pdata->ping_nen = of_get_named_gpio_flags(np, "battery,ping_nen",
+				0, &irq_gpio_flags);
+		if (ret < 0) {
+			dev_err(dev, "%s : can't ping_nen\r\n", __FUNCTION__);
 		}
 
 		p = of_get_property(np, "battery,wireless20_vout_list", &len);
@@ -5416,11 +4544,8 @@ static int mfc_chg_parse_dt(struct device *dev,
 		} else {
 			pr_err("%s there is no wireless20_max_power_list\n", __func__);
 		}
-
-		pdata->wpc_vout_ctrl_lcd_on = of_property_read_bool(np,
-				"battery,wpc_vout_ctrl_lcd_on");
-		if(pdata->wpc_vout_ctrl_lcd_on)
-			pr_info("%s flicker w/a\n", __func__);
+		pdata->no_hv =
+		    of_property_read_bool(np, "battery,wireless_no_hv");
 
 		return 0;
 	}
@@ -5444,7 +4569,7 @@ create_attrs_failed:
 	return rc;
 }
 
-ssize_t mfc_show_attrs(struct device *dev,
+ssize_t mfc_s2miw04_show_attrs(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct power_supply *psy = dev_get_drvdata(dev);
@@ -5482,18 +4607,13 @@ ssize_t mfc_show_attrs(struct device *dev,
 		break;
 	case MFC_PACKET:
 		break;
-          case MFC_FLICKER_TEST:
-		i += scnprintf(buf + i, PAGE_SIZE - i, "%d %d\n",
-                               charger->flicker_delay,
-                               charger->flicker_vout_threshold);
-		break;
 	default:
 		return -EINVAL;
 	}
 	return i;
 }
 
-ssize_t mfc_store_attrs(struct device *dev,
+ssize_t mfc_s2miw04_store_attrs(struct device *dev,
 				struct device_attribute *attr,
 				const char *buf, size_t count)
 {
@@ -5541,20 +4661,6 @@ ssize_t mfc_store_attrs(struct device *dev,
 		ret = count;
 	}
 		break;
-          case MFC_FLICKER_TEST:
-            {
-		char tc;
-		if (sscanf(buf, "%c %10d\n", &tc, &x) == 2) {
-			pr_info("%s : flicker test change value. %c -> %d\n", __func__, tc, x);
-			if (tc == 'd') {
-				charger->flicker_delay = x;
-			} else if (tc == 'v') {
-				charger->flicker_vout_threshold = x;
-                        }
-                }
-		ret = count;
-		break;
-            }
 	default:
 		ret = -EINVAL;
 	}
@@ -5566,8 +4672,8 @@ static const struct power_supply_desc mfc_charger_power_supply_desc = {
 	.type = POWER_SUPPLY_TYPE_UNKNOWN,
 	.properties = mfc_charger_props,
 	.num_properties = ARRAY_SIZE(mfc_charger_props),
-	.get_property = mfc_chg_get_property,
-	.set_property = mfc_chg_set_property,
+	.get_property = mfc_s2miw04_chg_get_property,
+	.set_property = mfc_s2miw04_chg_set_property,
 };
 
 static void mfc_wpc_int_req_work(struct work_struct *work)
@@ -5583,9 +4689,7 @@ static void mfc_wpc_int_req_work(struct work_struct *work)
 		msleep(100);
 		ret = request_threaded_irq(charger->pdata->irq_wpc_int,
 				NULL, mfc_wpc_irq_thread,
-				IRQF_TRIGGER_FALLING |
-				IRQF_TRIGGER_RISING |
-				IRQF_ONESHOT,
+				IRQF_TRIGGER_LOW|IRQF_ONESHOT,
 				"wpc-irq", charger);
 		if (ret) {
 			pr_err("%s: Failed to Reqeust IRQ\n", __func__);
@@ -5608,7 +4712,7 @@ static enum alarmtimer_restart mfc_phm_alarm(
 	return ALARMTIMER_NORESTART;
 }
 
-static int mfc_charger_probe(
+static int mfc_s2miw04_charger_probe(
 						struct i2c_client *client,
 						const struct i2c_device_id *id)
 {
@@ -5620,7 +4724,12 @@ static int mfc_charger_probe(
 	int wc_w_state_irq;
 
 	dev_info(&client->dev,
-		"%s: MFC p9321 Charger Driver Loading\n", __func__);
+		"%s: MFC s2miw04 Charger Driver Loading\n", __func__);
+
+#if defined(CONFIG_WIRELESS_CHARGER_HAL_MFC)
+	if (client->addr != 0x3b)
+		client->addr = 0x3b;
+#endif
 
 	if (of_node) {
 		pdata = devm_kzalloc(&client->dev, sizeof(*pdata), GFP_KERNEL);
@@ -5669,18 +4778,14 @@ static int mfc_charger_probe(
 	charger->pdata->vout_status = MFC_VOUT_5V;
 	charger->pdata->opfq_cnt = 0;
 
-        charger->flicker_delay = 1000;
-        charger->flicker_vout_threshold = MFC_VOUT_8V;
-
 	charger->is_mst_on = MST_MODE_0;
-	charger->chip_id = MFC_CHIP_IDT;
-	charger->chip_id_now = MFC_CHIP_ID_P9320;
+	charger->chip_id = MFC_CHIP_LSI;
+	charger->chip_id_now = MFC_CHIP_ID_S2MIW04;
 	charger->is_otg_on = false;
 	charger->led_cover = 0;
 	charger->vout_mode = WIRELESS_VOUT_OFF;
 	charger->is_full_status = 0;
 	charger->is_afc_tx = false;
-	charger->pad_ctrl_by_lcd = false;
 	charger->wc_tx_enable = false;
 	charger->initial_wc_check = false;
 	charger->wc_rx_connected = false;
@@ -5689,12 +4794,12 @@ static int mfc_charger_probe(
 	charger->current_rx_power = TX_RX_POWER_0W;
 	charger->tx_id = TX_ID_UNKNOWN;
 	charger->tx_id_cnt = 0;
-	charger->initial_vrect = false;
 	charger->wc_ldo_status = MFC_LDO_ON;
 	charger->tx_id_done = false;
 	charger->wc_rx_type = NO_DEV;
 	charger->is_suspend = false;
 	charger->device_event = 0;
+	charger->duty_min = 20;
 	charger->wpc_en_flag = (WPC_EN_SYSFS | WPC_EN_CHARGING | WPC_EN_CCIC);
 
 	mutex_init(&charger->io_lock);
@@ -5713,27 +4818,27 @@ static int mfc_charger_probe(
 		INIT_DELAYED_WORK(&charger->wpc_tx_isr_work, mfc_wpc_tx_isr_work);
 		INIT_DELAYED_WORK(&charger->wpc_tx_id_work, mfc_wpc_tx_id_work);
 		INIT_DELAYED_WORK(&charger->wpc_int_req_work, mfc_wpc_int_req_work);
-		INIT_DELAYED_WORK(&charger->wpc_vrect_check_work, mfc_vrect_check_work);
 	}
 	INIT_DELAYED_WORK(&charger->wpc_vout_mode_work, mfc_wpc_vout_mode_work);
 	INIT_DELAYED_WORK(&charger->wpc_afc_vout_work, mfc_wpc_afc_vout_work);
 	INIT_DELAYED_WORK(&charger->wpc_fw_update_work, mfc_wpc_fw_update_work);
-	INIT_DELAYED_WORK(&charger->wpc_cm_fet_work, mfc_wpc_cm_fet_work);
 	INIT_DELAYED_WORK(&charger->wpc_i2c_error_work, mfc_wpc_i2c_error_work);
 	INIT_DELAYED_WORK(&charger->wpc_rx_type_det_work, mfc_wpc_rx_type_det_work);
 	INIT_DELAYED_WORK(&charger->wpc_rx_connection_work, mfc_wpc_rx_connection_work);
-	INIT_DELAYED_WORK(&charger->wpc_tx_op_freq_work, mfc_tx_op_freq_work);
+	INIT_DELAYED_WORK(&charger->wpc_tx_duty_min_work, mfc_tx_duty_min_work);
 	INIT_DELAYED_WORK(&charger->wpc_tx_min_op_freq_work, mfc_tx_min_op_freq_work);
 	INIT_DELAYED_WORK(&charger->wpc_tx_phm_work, mfc_tx_phm_work);
-	INIT_DELAYED_WORK(&charger->wpc_cs100_work, mfc_cs100_work);
 	INIT_DELAYED_WORK(&charger->wpc_rx_power_work, mfc_wpc_rx_power_work);
+#if defined(CONFIG_SEC_FACTORY)
+	INIT_DELAYED_WORK(&charger->evt2_err_detect_work, mfc_evt2_err_detect_work);
+#endif
 
 	/*
 	* Default Idle voltage of the INT_A is LOW.
 	* Prevent the un-wanted INT_A Falling handling.
 	* This is a work-around, and will be fixed by the revision.
 	*/
-	INIT_DELAYED_WORK(&charger->mst_off_work, mfc_mst_off_work);
+	//INIT_DELAYED_WORK(&charger->mst_off_work, mfc_mst_off_work);
 
 	alarm_init(&charger->phm_alarm, ALARM_BOOTTIME,
 				mfc_phm_alarm);
@@ -5763,8 +4868,8 @@ static int mfc_charger_probe(
 			"wpc_tx_min_opfq_lock");
 	wake_lock_init(&charger->wpc_opfq_lock, WAKE_LOCK_SUSPEND,
 			"wpc_opfq_lock");
-	wake_lock_init(&charger->wpc_tx_opfq_lock, WAKE_LOCK_SUSPEND,
-			"wpc_tx_opfq_lock");
+	wake_lock_init(&charger->wpc_tx_duty_min_lock, WAKE_LOCK_SUSPEND,
+			"wpc_tx_duty_min_lock");
 	wake_lock_init(&charger->wpc_afc_vout_lock, WAKE_LOCK_SUSPEND,
 			"wpc_afc_vout_lock");
 	wake_lock_init(&charger->wpc_vout_mode_lock, WAKE_LOCK_SUSPEND,
@@ -5775,12 +4880,20 @@ static int mfc_charger_probe(
 			"wpc_rx_det_lock");
 	wake_lock_init(&charger->wpc_tx_phm_lock, WAKE_LOCK_SUSPEND,
 			"wpc_tx_phm_lock");
-	wake_lock_init(&charger->wpc_vrect_check_lock, WAKE_LOCK_SUSPEND,
-			"wpc_vrect_check_lock");
 	wake_lock_init(&charger->wpc_tx_id_lock, WAKE_LOCK_SUSPEND,
 			"wpc_tx_id_lock");
-	wake_lock_init(&charger->wpc_cs100_lock, WAKE_LOCK_SUSPEND,
-			"wpc_cs100_lock");
+	wake_lock_init(&charger->wpc_pdrc_lock, WAKE_LOCK_SUSPEND,
+			"wpc_pdrc_lock");
+
+	ret = mfc_create_attrs(&charger->psy_chg->dev);
+	if (ret) {
+		dev_err(charger->dev,
+			"%s : Failed to create_attrs\n", __func__);
+	}
+
+	wc_w_state_irq = gpio_get_value(charger->pdata->wpc_int);
+	pr_info("%s wc_w_state_irq = %d\n", __func__, wc_w_state_irq);
+	device_init_wakeup(charger->dev, 1);
 
 	/* Enable interrupts after battery driver load */
 	/* wpc_det */
@@ -5796,46 +4909,39 @@ static int mfc_charger_probe(
 		}
 	}
 
+	/* wpc_pdrc */
+	if (charger->pdata->irq_wpc_pdrc) {
+		INIT_DELAYED_WORK(&charger->wpc_pdrc_work, mfc_wpc_pdrc_work);
+		ret = request_threaded_irq(charger->pdata->irq_wpc_pdrc,
+				NULL, mfc_wpc_pdrc_irq_thread,
+				IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING |
+				IRQF_ONESHOT,
+				"wpd-pdrc-irq", charger);
+		if (ret) {
+			pr_err("%s: Failed to Reqeust pdrc IRQ\n", __func__);
+			goto err_irq_wpc_det;
+		}
+	}
 	/* wpc_irq */
 	queue_delayed_work(charger->wqueue, &charger->wpc_int_req_work, msecs_to_jiffies(100));
 
-	wc_w_state_irq = gpio_get_value(charger->pdata->wpc_int);
-	pr_info("%s wc_w_state_irq = %d\n", __func__, wc_w_state_irq);
 	if (gpio_get_value(charger->pdata->wpc_det)) {
-		u8 irq_src[2];
-		pr_info("%s: Charger interrupt occured during lpm\n", __func__);
+		pr_info("%s: Charger is detected during lpm\n", __func__);
+		if (charger->pdata->wired_charger_name) {
+			union power_supply_propval value;
 
-		mfc_reg_read(charger->client, MFC_INT_A_L_REG, &irq_src[0]);
-		mfc_reg_read(charger->client, MFC_INT_A_H_REG, &irq_src[1]);
-		/* clear intterupt */
-		pr_info("%s: interrupt source(0x%x)\n", __func__, irq_src[1] << 8 | irq_src[0]);		
-		mfc_reg_write(charger->client, MFC_INT_A_CLEAR_L_REG, irq_src[0]); // clear int
-		mfc_reg_write(charger->client, MFC_INT_A_CLEAR_H_REG, irq_src[1]); // clear int
-		mfc_set_cmd_l_reg(charger, 0x20, MFC_CMD_CLEAR_INT_MASK); // command
-		queue_delayed_work(charger->wqueue, &charger->wpc_det_work, 0);
-		if (!wc_w_state_irq && !delayed_work_pending(&charger->wpc_isr_work)) {
-			wake_lock(&charger->wpc_rx_wake_lock);
-			queue_delayed_work(charger->wqueue, &charger->wpc_isr_work, msecs_to_jiffies(2000));
+			value.intval = SEC_BATTERY_CABLE_WIRELESS;
+			ret =psy_do_property(charger->pdata->wired_charger_name, get,
+					POWER_SUPPLY_PROP_CURRENT_AVG, value);
+			charger->input_current = (ret) ? 500 : value.intval;
+			pr_info("%s: updated input current (%d)\n",
+					__func__, charger->input_current);
 		}
-	}
-/*#if !defined(CONFIG_SEC_FACTORY)
-	else if (!lpcharge) {
-		pr_info("%s: call wpc_fw_booting_work for firmware update\n", __func__);
-		queue_delayed_work(charger->wqueue, &charger->wpc_fw_booting_work, 0);
-	}
-#endif*/
-
-	ret = mfc_create_attrs(&charger->psy_chg->dev);
-	if (ret) {
-		dev_err(charger->dev,
-			"%s : Failed to create_attrs\n", __func__);
+		queue_delayed_work(charger->wqueue, &charger->wpc_det_work, 0);
 	}
 
-	charger->is_probed = true;
 	dev_info(&client->dev,
-		"%s: MFC Charger Driver Loaded\n", __func__);
-
-	device_init_wakeup(charger->dev, 1);
+		"%s: MFC s2miw04 Charger Driver Loaded\n", __func__);
 	return 0;
 
 err_irq_wpc_det:
@@ -5845,14 +4951,14 @@ err_irq_wpc_det:
 	wake_lock_destroy(&charger->wpc_update_lock);
 	wake_lock_destroy(&charger->wpc_tx_min_opfq_lock);
 	wake_lock_destroy(&charger->wpc_opfq_lock);
-	wake_lock_destroy(&charger->wpc_tx_opfq_lock);
+	wake_lock_destroy(&charger->wpc_tx_duty_min_lock);
 	wake_lock_destroy(&charger->wpc_afc_vout_lock);
 	wake_lock_destroy(&charger->wpc_vout_mode_lock);
 	wake_lock_destroy(&charger->wpc_rx_connection_lock);
 	wake_lock_destroy(&charger->wpc_rx_det_lock);
 	wake_lock_destroy(&charger->wpc_tx_phm_lock);
-	wake_lock_destroy(&charger->wpc_vrect_check_lock);
 	wake_lock_destroy(&charger->wpc_tx_id_lock);
+	wake_lock_destroy(&charger->wpc_pdrc_lock);
 err_pdata_free:
 	power_supply_unregister(charger->psy_chg);
 err_supply_unreg:
@@ -5868,7 +4974,7 @@ err_parse_dt:
 	return ret;
 }
 
-static int mfc_charger_remove(struct i2c_client *client)
+static int mfc_s2miw04_charger_remove(struct i2c_client *client)
 {
 	struct mfc_charger_data *charger = i2c_get_clientdata(client);
 
@@ -5882,18 +4988,20 @@ static int mfc_charger_suspend(struct device *dev)
 {
 	struct mfc_charger_data *charger = dev_get_drvdata(dev);
 
-	pr_info("%s det(%d) int(%d)\n", __func__, 
-		gpio_get_value(charger->pdata->wpc_det),
-		gpio_get_value(charger->pdata->wpc_int));
+	pr_info("%s\n", __func__);
 
 	charger->is_suspend = true;
 
-	if (device_may_wakeup(charger->dev)) {
+	if (device_may_wakeup(charger->dev)){
 		enable_irq_wake(charger->pdata->irq_wpc_int);
 		enable_irq_wake(charger->pdata->irq_wpc_det);
+		if (charger->pdata->irq_wpc_pdrc)
+			enable_irq_wake(charger->pdata->irq_wpc_pdrc);
 	}
 	disable_irq(charger->pdata->irq_wpc_int);
 	disable_irq(charger->pdata->irq_wpc_det);
+	if (charger->pdata->irq_wpc_pdrc)
+		disable_irq(charger->pdata->irq_wpc_pdrc);
 
 	return 0;
 }
@@ -5902,18 +5010,20 @@ static int mfc_charger_resume(struct device *dev)
 {
 	struct mfc_charger_data *charger = dev_get_drvdata(dev);
 
-	pr_info("%s det(%d) int(%d)\n", __func__,
-		gpio_get_value(charger->pdata->wpc_det),
-		gpio_get_value(charger->pdata->wpc_int));
+	pr_info("%s\n", __func__);
 
 	charger->is_suspend = false;
 
 	if (device_may_wakeup(charger->dev)) {
 		disable_irq_wake(charger->pdata->irq_wpc_int);
 		disable_irq_wake(charger->pdata->irq_wpc_det);
+		if (charger->pdata->irq_wpc_pdrc)
+			disable_irq_wake(charger->pdata->irq_wpc_pdrc);
 	}
 	enable_irq(charger->pdata->irq_wpc_int);
 	enable_irq(charger->pdata->irq_wpc_det);
+	if (charger->pdata->irq_wpc_pdrc)
+		enable_irq(charger->pdata->irq_wpc_pdrc);
 
 	return 0;
 }
@@ -5922,7 +5032,7 @@ static int mfc_charger_resume(struct device *dev)
 #define mfc_charger_resume NULL
 #endif
 
-static void mfc_charger_shutdown(struct i2c_client *client)
+static void mfc_s2miw04_charger_shutdown(struct i2c_client *client)
 {
 	struct mfc_charger_data *charger = i2c_get_clientdata(client);
 	is_shutdn = true;
@@ -5931,75 +5041,64 @@ static void mfc_charger_shutdown(struct i2c_client *client)
 	cancel_delayed_work(&charger->wpc_vout_mode_work);
 	alarm_cancel(&charger->phm_alarm);
 
-	if (gpio_get_value(charger->pdata->wpc_det)) {
-		pr_info("%s: forced 5V Vout\n", __func__);
-		mfc_set_vrect_adjust(charger, MFC_HEADROOM_1);
-		mfc_set_vout(charger, MFC_VOUT_5V);
-
-#if defined(CONFIG_SEC_BLOOMQ_PROJECT)
-		if (charger->is_afc_tx)
-			mfc_send_command(charger, MFC_AFC_CONF_5V_TX);
-#endif
-	}
-
-#if defined(CONFIG_SEC_BLOOMQ_PROJECT)
 	gpio_direction_output(charger->pdata->wpc_en, 1);
 	pr_info("%s: disable wpc_en\n", __func__);
-#endif
 }
 
-static const struct i2c_device_id mfc_charger_id_table[] = {
-	{ "mfc-charger", 0 },
+static const struct i2c_device_id mfc_s2miw04_charger_id_table[] = {
+	{ "mfc-s2miw04-charger", 0 },
 	{ },
 };
-MODULE_DEVICE_TABLE(i2c, mfc_id_table);
+MODULE_DEVICE_TABLE(i2c, mfc_s2miw04_charger_id_table);
 
 #ifdef CONFIG_OF
-static struct of_device_id mfc_charger_match_table[] = {
-	{ .compatible = "idt,mfc-charger",},
+static struct of_device_id mfc_s2miw04_charger_match_table[] = {
+	{ .compatible = "lsi,mfc-s2miw04-charger",},
 	{},
 };
+MODULE_DEVICE_TABLE(of, mfc_s2miw04_charger_match_table);
 #else
-#define mfc_charger_match_table NULL
+#define mfc_s2miw04_charger_match_table NULL
 #endif
 
-const struct dev_pm_ops mfc_pm = {
+const struct dev_pm_ops mfc_s2miw04_pm = {
 	SET_SYSTEM_SLEEP_PM_OPS(mfc_charger_suspend,mfc_charger_resume)
 };
 
-static struct i2c_driver mfc_charger_driver = {
+static struct i2c_driver mfc_s2miw04_charger_driver = {
 	.driver = {
-		.name	= "mfc-charger",
+		.name	= "mfc-s2miw04-charger",
 		.owner	= THIS_MODULE,
 #if defined(CONFIG_PM)
-		.pm = &mfc_pm,
+		.pm = &mfc_s2miw04_pm,
 #endif /* CONFIG_PM */
-		.of_match_table = mfc_charger_match_table,
+		.of_match_table = mfc_s2miw04_charger_match_table,
 	},
-	.shutdown	= mfc_charger_shutdown,
-	.probe	= mfc_charger_probe,
-	.remove	= mfc_charger_remove,
-	.id_table	= mfc_charger_id_table,
+	.shutdown	= mfc_s2miw04_charger_shutdown,
+	.probe	= mfc_s2miw04_charger_probe,
+	.remove	= mfc_s2miw04_charger_remove,
+	.id_table	= mfc_s2miw04_charger_id_table,
 };
 
-static int __init mfc_charger_init(void)
+static int __init mfc_s2miw04_charger_init(void)
 {
 #if defined(CONFIG_WIRELESS_CHARGER_HAL_MFC)
-	if (mfc_chip_id_now != 0xFF && mfc_chip_id_now != MFC_CHIP_ID_P9320)
+	if (mfc_chip_id_now != 0xFF && mfc_chip_id_now != MFC_CHIP_ID_S2MIW04)
 		return -ENODEV;
 #endif
+
 	pr_info("%s\n", __func__);
-	return i2c_add_driver(&mfc_charger_driver);
+	return i2c_add_driver(&mfc_s2miw04_charger_driver);
 }
 
-static void __exit mfc_charger_exit(void)
+static void __exit mfc_s2miw04_charger_exit(void)
 {
 	pr_info("%s\n", __func__);
-	i2c_del_driver(&mfc_charger_driver);
+	i2c_del_driver(&mfc_s2miw04_charger_driver);
 }
 
-module_init(mfc_charger_init);
-module_exit(mfc_charger_exit);
+module_init(mfc_s2miw04_charger_init);
+module_exit(mfc_s2miw04_charger_exit);
 
 MODULE_DESCRIPTION("Samsung MFC Charger Driver");
 MODULE_AUTHOR("Samsung Electronics");
