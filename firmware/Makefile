@@ -12,69 +12,56 @@ fwabs := $(addprefix $(srctree)/,$(filter-out /%,$(fwdir)))$(filter /%,$(fwdir))
 
 fw-external-y := $(subst $(quote),,$(CONFIG_EXTRA_FIRMWARE))
 
-# There are three cases to care about:
-# 1. Building kernel with CONFIG_FIRMWARE_IN_KERNEL=y -- $(fw-shipped-y) should
-#    include the firmware files to include, according to .config
-# 2. 'make modules_install', which will install firmware for modules, and 
-#    _also_ for the in-kernel drivers when CONFIG_FIRMWARE_IN_KERNEL=n
-# 3. 'make firmware_install', which installs all firmware, unconditionally.
+# TSP FW
+fw-external-$(CONFIG_TOUCHSCREEN_SEC_TS_Y771) += tsp_sec/y761_beyond0_phole.bin tsp_sec/y771_beyond1_phole.bin \
+						tsp_sec/y771_beyond2_phole.bin tsp_sec/y771_beyondx_phole.bin
+fw-external-$(CONFIG_TOUCHSCREEN_SEC_TS_Y771_D) += tsp_sec/y771_d1.bin tsp_sec/y771_d2.bin \
+						tsp_sec/y771_d1_bringup.bin tsp_sec/y771_davinci_bringup.bin tsp_sec/y771_davinci_bringup2nd.bin
+fw-external-$(CONFIG_TOUCHSCREEN_SEC_TS_Y761_SUB) += tsp_sec/y761_winner.bin
+fw-external-$(CONFIG_TOUCHSCREEN_SEC_TS_Y771_R5) += tsp_sec/y771_r5.bin tsp_sec/y771_r5_1l.bin
+fw-external-$(CONFIG_TOUCHSCREEN_SEC_TS_Y79A) += tsp_sec/y79a_a82xq.bin
 
-# For the former two cases we want $(fw-shipped-y) and $(fw-shipped-m) to be
-# accurate. In the latter case it doesn't matter -- it'll use $(fw-shipped-all).
-# But be aware that the config file might not be included at all.
+fw-external-$(CONFIG_TOUCHSCREEN_FTS9)	+= tsp_stm/fts9cu80f_winner.fw
+fw-external-$(CONFIG_TOUCHSCREEN_FTS9CU80F_B)	+= tsp_stm/fts9cu80f_bloom.fw
+fw-external-$(CONFIG_TOUCHSCREEN_FTS1BA90A)	+= tsp_stm/fts1ba90a_gts5.fw
+fw-external-$(CONFIG_TOUCHSCREEN_ZINITIX_ZTW522)	+= tsp_zinitix/ztw522_bloom.bin
 
-fw-external-$(CONFIG_TOUCHSCREEN_IST40XX) += tsp_imagis/ist40xx_r1.bin tsp_imagis/ist40xx_r1_cmcs.bin \
-						tsp_imagis/ist40xx_a70.bin tsp_imagis/ist40xx_a70_cmcs.bin tsp_imagis/ist40xx_a70s.bin tsp_imagis/ist40xx_a70s_cmcs.bin
-						
-fw-external-$(CONFIG_TOUCHSCREEN_MELFAS_MSS100) += tsp_melfas/mss100_a70s.bin
+fw-external-$(CONFIG_KEYBOARD_STM_FSR)	+= key_stm/fsr1ad04_davinci.fw key_stm/fsr1ad04_davinci_dv1.fw \
+					key_stm/fsr1ad04_d1.fw key_stm/fsr1ad04_d2.fw
 
-fw-external-$(CONFIG_TOUCHSCREEN_SEC_TS_Y771) += tsp_sec/y771_a71.bin tsp_sec/y771_a71_1l.bin tsp_sec/y771_m51.bin tsp_sec/y771_m51_sdc.bin
+fw-shipped-$(CONFIG_EPEN_WACOM_W9020) += epen/w9020_d2.fw epen/w9020_d1.fw
+ifdef CONFIG_SEC_FACTORY
+fw-shipped-$(CONFIG_EPEN_WACOM_W9020) += epen/w9020_d2_unit.fw epen/w9020_d1_unit.fw
+endif
+fw-shipped-$(CONFIG_EPEN_WACOM_W9021) += epen/w9021_gts5l.fw epen/w9021_gts6x.fw
 
-fw-external-$(CONFIG_TOUCHSCREEN_ZINITIX_ZT7650) += tsp_zinitix/zt7650_a52.bin tsp_zinitix/zt7650_a72.bin tsp_zinitix/zt7650_a72_3rd.bin
+fw-external-$(CONFIG_TOUCHSCREEN_IST40XX) += tsp_imagis/ist40xx_a905g.bin tsp_imagis/ist40xx_a905g_cmcs.bin
+fw-shipped-$(CONFIG_TOUCHSCREEN_MELFAS_MSS100) += tsp_melfas/mss100_r3.fw
+# FPGA
+fw-shipped-$(CONFIG_POGO_FPGA)	+= fpga/pogo_gts5l.fw
 
-fw-external-$(CONFIG_TOUCHSCREEN_STM_FTS5CU56A) += tsp_stm/fts5cu56a_a52.bin tsp_stm/fts5cu56a_a72.bin tsp_stm/fts5cu56a_m42.bin
-fw-external-$(CONFIG_TOUCHSCREEN_HIMAX_IC_HX83102) += tsp_himax/hx83102e_gts6litereresh.bin
+fw-external-$(CONFIG_WIRELESS_FIRMWARE_UPDATE) += mfc/mfc_fw_flash.bin
+ifdef CONFIG_WIRELESS_FIRMWARE_UPDATE
+fw-external-$(CONFIG_WIRELESS_CHARGER_MFC_S2MIW04) += mfc/mfc_fw_flash_s2miw04.bin
+endif
 
-ifdef CONFIG_SEC_A70Q_PROJECT
-ifdef CONFIG_SEC_A70Q_USA_PROJECT
-fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t346_a70q_usa.bin
-fw-external-$(CONFIG_SENSORS_A96T3X6_SUB) += abov/a96t346_a70q_sub_usa.bin
+ifdef CONFIG_SEC_BEYOND0QLTE_PROJECT
+fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_beyond0qlte.bin
+else ifdef CONFIG_SEC_BEYOND1QLTE_PROJECT
+fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_beyond1qlte.bin
+else ifdef CONFIG_SEC_BEYOND2QLTE_PROJECT
+fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_beyond2qlte.bin
+else ifdef CONFIG_SEC_GTS6L_PROJECT
+fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_gts6llte.bin
+fw-external-$(CONFIG_SENSORS_A96T3X6_WIFI) += abov/a96t356_wifi_gts6llte.bin
+else ifdef CONFIG_SEC_GTS6LWIFI_PROJECT
+fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_gts6lwifi.bin
+fw-external-$(CONFIG_SENSORS_A96T3X6_WIFI) += abov/a96t356_wifi_gts6lwifi.bin
+else ifdef CONFIG_SEC_GTS6X_PROJECT
+fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_gts6x.bin
+fw-external-$(CONFIG_SENSORS_A96T3X6_WIFI) += abov/a96t356_wifi_gts6x.bin
 else
-fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t346_a70q_eur.bin
-endif
-else ifdef CONFIG_SEC_A70SQ_PROJECT
-fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_a70sq.bin
-fw-external-$(CONFIG_SENSORS_A96T3X6_SUB) += abov/a96t356_a70sq_sub.bin
-else ifdef CONFIG_SEC_A71_PROJECT
-ifdef CONFIG_SEC_A71_CAN_PROJECT
-fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_a71_can.bin
-fw-external-$(CONFIG_SENSORS_A96T3X6_SUB) += abov/a96t356_a71_sub_can.bin
-else
-fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_a71.bin
-fw-external-$(CONFIG_SENSORS_A96T3X6_SUB) += abov/a96t356_a71_sub.bin
-endif
-else ifdef CONFIG_SEC_M41_PROJECT
-fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_m41.bin
-fw-external-$(CONFIG_SENSORS_A96T3X6_SUB) += abov/a96t356_m41_sub.bin
-else ifdef CONFIG_SEC_M51_PROJECT
-fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_m51.bin
-fw-external-$(CONFIG_SENSORS_A96T3X6_SUB) += abov/a96t356_m51_sub.bin
-else ifdef CONFIG_SEC_A70S_PROJECT
-fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t346_a70q_eur.bin
-endif
-
-fw-external-$(CONFIG_TOUCHSCREEN_NOVATEK_NT36672) += tsp_novatek/nt36672_a60.bin tsp_novatek/nt36672_m40.bin \
-						tsp_novatek/nt36672_a60_tianma.bin
-
-fw-external-$(CONFIG_EPEN_WACOM_WEZ01) += epen/w9021_gts6lite.bin
-fw-external-$(CONFIG_EPEN_WACOM_W9019) += epen/w9019_gts6lite.bin
-
-#touch based grip sensor
-fw-shipped-$(CONFIG_SENSORS_TC3XXK_A60) += coreriver/tc305k_a60_grip.fw
-
-# FIVE
-ifeq ($(CONFIG_FIVE_TEE_DRIVER),y)
-include $(srctree)/firmware/five/Makefile
+fw-external-$(CONFIG_SENSORS_A96T3X6) += abov/a96t356_beyond1qlte.bin
 endif
 
 fw-shipped-all := $(fw-shipped-y) $(fw-shipped-m) $(fw-shipped-)
@@ -134,29 +121,6 @@ $(patsubst %,$(obj)/%.gen.o, $(fw-external-y)): $(obj)/%.gen.o: $(fwdir)/%
 $(obj)/%: $(obj)/%.ihex
 	$(call cmd,ihex)
 
-# Don't depend on ihex2fw if we're installing and it already exists.
-# Putting it after | in the dependencies doesn't seem sufficient when
-# we're installing after a cross-compile, because ihex2fw has dependencies
-# on stuff like /usr/lib/gcc/ppc64-redhat-linux/4.3.0/include/stddef.h and 
-# thus wants to be rebuilt. Which it can't be, if the prebuilt kernel tree
-# is exported read-only for someone to run 'make install'.
-ifeq ($(INSTALL):$(wildcard $(obj)/ihex2fw),install:$(obj)/ihex2fw)
-ihex2fw_dep :=
-else
-ihex2fw_dep := $(obj)/ihex2fw
-endif
-
-# .HEX is also Intel HEX, but where the offset and length in each record
-# is actually meaningful, because the firmware has to be loaded in a certain
-# order rather than as a single binary blob. Thus, we convert them into our
-# more compact binary representation of ihex records (<linux/ihex.h>)
-$(obj)/%.fw: $(obj)/%.HEX $(ihex2fw_dep)
-	$(call cmd,ihex2fw)
-
-# .H16 is our own modified form of Intel HEX, with 16-bit length for records.
-$(obj)/%.fw: $(obj)/%.H16 $(ihex2fw_dep)
-	$(call cmd,h16tofw)
-
 obj-y				 += $(patsubst %,%.gen.o, $(fw-external-y))
 obj-$(CONFIG_FIRMWARE_IN_KERNEL) += $(patsubst %,%.gen.o, $(fw-shipped-y))
 
@@ -166,13 +130,8 @@ ifeq ($(KBUILD_SRC),)
 _dummy := $(foreach d,$(addprefix $(obj)/,$(dir $(fw-external-y))), $(shell [ -d $(d) ] || mkdir -p $(d)))
 endif
 
-# Remove .S files and binaries created from ihex
-# (during 'make clean' .config isn't included so they're all in $(fw-shipped-))
-targets := $(fw-shipped-) $(patsubst $(obj)/%,%, \
-				$(shell find $(obj) -name \*.gen.S 2>/dev/null))
-
+targets := $(patsubst $(obj)/%,%, \
+                                $(shell find $(obj) -name \*.gen.S 2>/dev/null))
 # Without this, built-in.o won't be created when it's empty, and the
 # final vmlinux link will fail.
 obj- := dummy
-
-hostprogs-y := ihex2fw
