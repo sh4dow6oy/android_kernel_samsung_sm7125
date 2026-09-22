@@ -272,8 +272,6 @@ static int s2mu107_i2c_probe(struct i2c_client *i2c,
 	i2c_set_clientdata(i2c, s2mu107);
 
 	s2mu107_read_reg(s2mu107->i2c, S2MU107_REG_ESREV_NUM, &temp);
-	if (temp < 0)
-		pr_err("[s2mu107 mfd] %s : i2c read error\n", __func__);
 
 	s2mu107->pmic_rev = temp & S2MU107_REG_REV_MASK;
 	s2mu107->pmic_es = temp & S2MU107_REG_ES_MASK;
@@ -330,12 +328,10 @@ static const struct i2c_device_id s2mu107_i2c_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, s2mu107_i2c_id);
 
-#if defined(CONFIG_OF)
 static struct of_device_id s2mu107_i2c_dt_ids[] = {
-	{.compatible = "samsung,s2mu107mfd"},
+	{.compatible = "samsung,s2mu107mfd",},
 	{ },
 };
-#endif /* CONFIG_OF */
 
 #if defined(CONFIG_PM)
 static int s2mu107_suspend(struct device *dev)
@@ -366,8 +362,8 @@ static int s2mu107_resume(struct device *dev)
 	return 0;
 }
 #else
-#define s2mu107_suspend	NULL
-#define s2mu107_resume	NULL
+#define s2mu106_suspend	NULL
+#define s2mu106_resume	NULL
 #endif /* CONFIG_PM */
 
 const struct dev_pm_ops s2mu107_pm = {
@@ -376,19 +372,17 @@ const struct dev_pm_ops s2mu107_pm = {
 };
 
 static struct i2c_driver s2mu107_i2c_driver = {
-	.driver		= {
-		.name	= MFD_DEV_NAME,
-		.owner	= THIS_MODULE,
-#if defined(CONFIG_PM)
-		.pm	= &s2mu107_pm,
-#endif /* CONFIG_PM */
-#if defined(CONFIG_OF)
-		.of_match_table	= s2mu107_i2c_dt_ids,
-#endif /* CONFIG_OF */
-	},
 	.probe		= s2mu107_i2c_probe,
 	.remove		= s2mu107_i2c_remove,
 	.id_table	= s2mu107_i2c_id,
+	.driver		= {
+		.name	= MFD_DEV_NAME,
+		.owner	= THIS_MODULE,
+		.of_match_table	= s2mu107_i2c_dt_ids,
+#if defined(CONFIG_PM)
+		.pm	= &s2mu107_pm,
+#endif /* CONFIG_PM */
+	},
 };
 
 static int __init s2mu107_i2c_init(void)

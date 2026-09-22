@@ -249,9 +249,6 @@ static void s2mu106_irq_sync_unlock(struct irq_data *data)
 	u8 mask_reg;
 	struct i2c_client *i2c;
 
-	if (s2mu106->change_irq_mask == false)
-		goto skip;
-
 	for (i = 0; i < S2MU106_IRQ_GROUP_NR; i++) {
 		mask_reg = s2mu106_mask_reg[i];
 		i2c = get_i2c(s2mu106, i);
@@ -265,8 +262,6 @@ static void s2mu106_irq_sync_unlock(struct irq_data *data)
 				s2mu106->irq_masks_cur[i]);
 	}
 
-	s2mu106->change_irq_mask = false;
-skip:
 	mutex_unlock(&s2mu106->irqlock);
 }
 
@@ -286,7 +281,6 @@ static void s2mu106_irq_mask(struct irq_data *data)
 		return;
 
 	s2mu106->irq_masks_cur[irq_data->group] |= irq_data->mask;
-	s2mu106->change_irq_mask = true;
 }
 
 static void s2mu106_irq_unmask(struct irq_data *data)
@@ -299,7 +293,6 @@ static void s2mu106_irq_unmask(struct irq_data *data)
 		return;
 
 	s2mu106->irq_masks_cur[irq_data->group] &= ~irq_data->mask;
-	s2mu106->change_irq_mask = true;
 }
 static void s2mu106_irq_disable(struct irq_data *data)
 {

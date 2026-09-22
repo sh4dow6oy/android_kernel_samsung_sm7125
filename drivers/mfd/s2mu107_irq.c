@@ -28,19 +28,31 @@
 
 /* TODO : add IP Header file include*/
 #if defined(CONFIG_CHARGER_S2MU107)
+#if defined(CONFIG_BATTERY_SAMSUNG_LEGO_STYLE)
+#include "../battery/charger/s2mu107_switching_charger.h"
+#else
 #include "../battery_v2/include/charger/s2mu107_switching_charger.h"
+#endif
 #endif
 #if defined(CONFIG_MUIC_S2MU107)
 #include <linux/muic/s2mu107-muic.h>
 #endif
 #if defined(CONFIG_PM_S2MU107)
+#if defined(CONFIG_BATTERY_SAMSUNG_LEGO_STYLE)
+#include "../battery/charger/s2mu107_pmeter.h"
+#else
 #include "../battery_v2/include/s2mu107_pmeter.h"
+#endif
 #endif
 #if defined(CONFIG_LEDS_S2MU107_FLASH)
 #include <linux/leds-s2mu107.h>
 #endif
 #if defined(CONFIG_CHARGER_S2MU107_DIRECT)
+#if defined(CONFIG_BATTERY_SAMSUNG_LEGO_STYLE)
+#include "../battery/charger/s2mu107_direct_charger.h"
+#else
 #include "../battery_v2/include/charger/s2mu107_direct_charger.h"
+#endif
 #endif
 static const u8 s2mu107_mask_reg[] = {
 #if defined(CONFIG_LEDS_S2MU107_FLASH)
@@ -72,6 +84,40 @@ static const u8 s2mu107_mask_reg[] = {
 	[PM_INT2] = S2MU107_PM_INT2_MASK,
 #endif
 };
+
+/* Interrupt register */
+#define S2MU107_FLED_INT1		0x02
+#define S2MU107_FLED_INT2		0x03
+
+#define S2MU107_FLED_INT1_MASK		0x0A
+#define S2MU107_FLED_INT2_MASK		0x0B
+
+#define S2MU107_SC_INT1		0x00
+#define S2MU107_SC_INT2		0x01
+#define S2MU107_SC_INT3		0x02
+
+#define S2MU107_SC_INT1_MASK	0x08
+#define S2MU107_SC_INT2_MASK	0x09
+#define S2MU107_SC_INT3_MASK	0x0A
+
+#define S2MU107_PM_VALUP1	0x03
+#define S2MU107_PM_VALUP2	0x04
+#define S2MU107_PM_INT1		0x05
+#define S2MU107_PM_INT2		0x06
+#define S2MU107_PM_VALUP1_MASK	0x0B
+#define S2MU107_PM_VALUP2_MASK	0x0C
+#define S2MU107_PM_INT1_MASK	0x0D
+#define S2MU107_PM_INT2_MASK	0x0E
+
+#define S2MU107_DC_INT0		0x03
+#define S2MU107_DC_INT1		0x04
+#define S2MU107_DC_INT2		0x05
+#define S2MU107_DC_INT3		0x06
+
+#define S2MU107_DC_INT0_MASK		0x0B
+#define S2MU107_DC_INT1_MASK		0x0C
+#define S2MU107_DC_INT2_MASK		0x0D
+#define S2MU107_DC_INT3_MASK		0x0E
 
 struct s2mu107_irq_data {
 	int mask;
@@ -154,6 +200,7 @@ static const struct s2mu107_irq_data s2mu107_irqs[] = {
 #endif
 #if defined(CONFIG_CHARGER_S2MU107_DIRECT)
 	DECLARE_IRQ(S2MU107_DC_IRQ2_DC_DONE,			DC_INT2, MASK(1,7)),
+
 	DECLARE_IRQ(S2MU107_DC_IRQ0_DC_OUT_OVP,			DC_INT0, MASK(1,0)),
 	DECLARE_IRQ(S2MU107_DC_IRQ0_DC_BAT_OKB,			DC_INT0, MASK(1,1)),
 	DECLARE_IRQ(S2MU107_DC_IRQ0_DC_BYP_OVP,			DC_INT0, MASK(1,2)),
@@ -263,9 +310,6 @@ static void s2mu107_irq_sync_unlock(struct irq_data *data)
 	u8 mask_reg;
 	struct i2c_client *i2c;
 
-	if (s2mu107->change_irq_mask == false)
- 		goto skip;
-
 	for (i = 0; i < S2MU107_IRQ_GROUP_NR; i++) {
 		mask_reg = s2mu107_mask_reg[i];
 		i2c = get_i2c(s2mu107, i);
@@ -279,8 +323,6 @@ static void s2mu107_irq_sync_unlock(struct irq_data *data)
 				s2mu107->irq_masks_cur[i]);
 	}
 
-	s2mu107->change_irq_mask = false;
-skip:
 	mutex_unlock(&s2mu107->irqlock);
 }
 
@@ -300,7 +342,6 @@ static void s2mu107_irq_mask(struct irq_data *data)
 		return;
 
 	s2mu107->irq_masks_cur[irq_data->group] |= irq_data->mask;
-	s2mu107->change_irq_mask = true;
 }
 
 static void s2mu107_irq_unmask(struct irq_data *data)
@@ -313,7 +354,6 @@ static void s2mu107_irq_unmask(struct irq_data *data)
 		return;
 
 	s2mu107->irq_masks_cur[irq_data->group] &= ~irq_data->mask;
-	s2mu107->change_irq_mask = true;
 }
 
 static struct irq_chip s2mu107_irq_chip = {
@@ -342,7 +382,6 @@ static irqreturn_t s2mu107_irq_thread(int irq, void *data)
 			MFD_DEV_NAME, __func__, ret);
 		return IRQ_NONE;
 	}
-	pr_info("%s: Top interrupt(0x%02x)\n", __func__, irq_src);
 
 #if defined(CONFIG_LEDS_S2MU107_FLASH)
 	if (irq_src & S2MU107_IRQSRC_FLED) {
@@ -432,7 +471,6 @@ static irqreturn_t s2mu107_irq_thread(int irq, void *data)
 			irq_reg[PM_INT1], irq_reg[PM_INT2]);
 	}
 #endif
-
 #if defined(CONFIG_LEDS_S2MU107_FLASH) || defined(CONFIG_CHARGER_S2MU107) || \
     defined(CONFIG_CHARGER_S2MU107_DIRECT) || defined(CONFIG_MUIC_S2MU107) || \
     defined(CONFIG_HV_MUIC_S2MU107_AFC) || defined(CONFIG_PM_S2MU107)
@@ -448,12 +486,14 @@ static irqreturn_t s2mu107_irq_thread(int irq, void *data)
 #endif
 	return IRQ_HANDLED;
 }
+
 static int irq_is_enable = true;
 int s2mu107_irq_init(struct s2mu107_dev *s2mu107)
 {
 	struct i2c_client *i2c = s2mu107->i2c;
 	int i, ret, cur_irq;
 	u8 i2c_data;
+	u8 irq_src;
 
 	if (!s2mu107->irq_gpio) {
 		dev_warn(s2mu107->dev, "No interrupt specified.\n");
@@ -529,6 +569,10 @@ int s2mu107_irq_init(struct s2mu107_dev *s2mu107)
 #if defined(CONFIG_CHARGER_S2MU107_DIRECT)
 	i2c_data &= ~(S2MU107_IRQSRC_DC);
 #endif
+
+	s2mu107_read_reg(s2mu107->i2c, S2MU107_REG_IPINT, &irq_src);
+	pr_info("%s: Test Test Top interrupt(0x%02x)\n", __func__, irq_src);
+
 	/* TODO: check write_reg */
 	s2mu107_write_reg(s2mu107->i2c, S2MU107_REG_IPINT_MASK, i2c_data);
 	pr_info("%s: %s init top-irq mask(0x%02x)\n",
@@ -548,6 +592,8 @@ int s2mu107_irq_init(struct s2mu107_dev *s2mu107)
 			s2mu107->irq, ret);
 		return ret;
 	}
+
+	//s2mu107_irq_thread(-1, s2mu107);
 
 	return 0;
 }

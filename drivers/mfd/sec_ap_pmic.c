@@ -19,16 +19,19 @@
 #include <linux/proc_fs.h>
 #include <linux/input/qpnp-power-on.h>
 #include <linux/sec_debug.h>
-#include <linux/seq_file.h>
+
+/* for enable/disable manual reset, from retail group's request */
+extern void do_keyboard_notifier(int onoff);
 
 static struct device *sec_ap_pmic_dev;
+
 
 static int pwrsrc_show(struct seq_file *m, void *v)
 {
 	char buf[SZ_1K];
 
 	sec_get_pwrsrc(buf);
-	seq_printf(m, "%s", buf);
+	seq_printf(m, buf);
 
 	return 0;
 }
@@ -45,7 +48,35 @@ static const struct file_operations proc_pwrsrc_operation = {
 	.release	= seq_release,
 };
 
-#ifdef CONFIG_MUIC_NOTIFIER
+static ssize_t manual_reset_show(struct device *in_dev,
+				struct device_attribute *attr, char *buf)
+{
+	int ret = 0;
+
+	ret = qpnp_get_s2_reset_onoff();
+
+	pr_info("%s: ret = %d\n", __func__, ret);
+	return sprintf(buf, "%d\n", ret);
+}
+
+static ssize_t manual_reset_store(struct device *in_dev,
+		struct device_attribute *attr, const char *buf, size_t len)
+{
+	int onoff = 0;
+
+	if (kstrtoint(buf, 10, &onoff))
+		return -EINVAL;
+
+	pr_info("%s: onoff(%d)\n", __func__, onoff);
+
+	do_keyboard_notifier(onoff);
+	qpnp_control_s2_reset_onoff(onoff);
+
+	return len;
+}
+static DEVICE_ATTR_RW(manual_reset);
+
+
 static ssize_t chg_det_show(struct device *in_dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -57,47 +88,24 @@ static ssize_t chg_det_show(struct device *in_dev,
 	return sprintf(buf, "%d\n", ret);
 }
 static DEVICE_ATTR_RO(chg_det);
-#endif
 
 static ssize_t off_reason_show(struct device *in_dev,
 				struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%s", qpnp_pon_get_off_reason());
+	return sprintf(buf, "%s\n", qpnp_pon_get_off_reason());
 }
 static DEVICE_ATTR_RO(off_reason);
 
-ssize_t print_gpio_exp(char *buf)
-{
-#ifdef CONFIG_GPIO_PCAL6524
-	extern ssize_t get_gpio_exp(char *buf);
-	return get_gpio_exp(buf);
-#else
-	return 0;
-#endif
-}
-EXPORT_SYMBOL(print_gpio_exp);
+static struct attribute *sec_ap_pmic_attributes[] = {
+	&dev_attr_chg_det.attr,
+	&dev_attr_manual_reset.attr,
+	&dev_attr_off_reason.attr,
+	NULL,
+};
 
-static ssize_t gpio_exp_show(struct device *in_dev,
-				struct device_attribute *attr, char *buf)
-{
-	return print_gpio_exp(buf);
-}
-static DEVICE_ATTR_RO(gpio_exp);
-
-static ssize_t debug_show(struct device *in_dev,
-				struct device_attribute *attr, char *buf)
-{
-	ssize_t size = 0;
-
-#ifdef CONFIG_MUIC_NOTIFIER
-	size += chg_det_show(in_dev, attr, buf+size);
-#endif
-	size += off_reason_show(in_dev, attr, buf+size);
-	size += gpio_exp_show(in_dev, attr, buf+size);
-
-	return size;
-}
-static DEVICE_ATTR_RO(debug);
+static struct attribute_group sec_ap_pmic_attr_group = {
+	.attrs = sec_ap_pmic_attributes,
+};
 
 static int __init sec_ap_pmic_init(void)
 {
@@ -112,32 +120,14 @@ static int __init sec_ap_pmic_init(void)
 		goto err_device_create;
 	}
 
-#ifdef CONFIG_MUIC_NOTIFIER
-	err = device_create_file(sec_ap_pmic_dev, &dev_attr_chg_det);
-	if (unlikely(err)) {
-		pr_err("%s: Failed to create chg_det\n", __func__);
-		goto err_device_create;
-	}
-#endif
-
-	err = device_create_file(sec_ap_pmic_dev, &dev_attr_off_reason);
-	if (unlikely(err)) {
-		pr_err("%s: Failed to create off_reason\n", __func__);
+	err = sysfs_create_group(&sec_ap_pmic_dev->kobj,
+				&sec_ap_pmic_attr_group);
+	if (err < 0) {
+		pr_err("%s: Failed to create sysfs group\n", __func__);
 		goto err_device_create;
 	}
 
-	err = device_create_file(sec_ap_pmic_dev, &dev_attr_gpio_exp);
-	if (unlikely(err)) {
-		pr_err("%s: Failed to create gpio_exp\n", __func__);
-		goto err_device_create;
-	}
 
-	err = device_create_file(sec_ap_pmic_dev, &dev_attr_debug);
-	if (unlikely(err)) {
-		pr_err("%s: Failed to create debug\n", __func__);
-		goto err_device_create;
-	}
-	
 	/* pmic pon logging for eRR.p */
 	entry = proc_create("pwrsrc", 0444, NULL, &proc_pwrsrc_operation);
 	if (unlikely(!entry)) {
